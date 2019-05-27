@@ -19,9 +19,9 @@ You can also set environment variables instead of passing on the command line.  
 ### az-query-log-analytics
 az-query-log-analytics takes a Kusto query (KQL) and passes it to the Log Analytics REST API.  It is NOT designed for large sets of data as it doesn't to break the return values up in any way.  What it does do though is make the return values useful.  The REST API for Log Analytics provides a network friendly JSON document format that minimizes bandwidth by listing the column names seperately from the row data.  This produces a more compact JSON document by reducing redundancy in the JSON at the cost of usefulness. This script will refactor the results into more useful formats like csv, table and verbose JSON.  You need to either pass a KQL file or pass it on stdin like below.  It also requires an Azure auth file as well as the workspace id for Log Analytics.
 
-The following environment variables can be used rather than passing on the command line...
-AZURE_AUTH_LOCATION  
-LOG_ANALYTICS_WORKSPACE_ID  
+The following environment variables can be used rather than passing on the command line...  
+  AZURE_AUTH_LOCATION  
+  LOG_ANALYTICS_WORKSPACE_ID  
 
 ```bash 
 python az-query-log-analtyics.py -t PT12H -w xxxxxxxxxxxxxxxx -a ~/.azureauth -o json <<EOF |  
