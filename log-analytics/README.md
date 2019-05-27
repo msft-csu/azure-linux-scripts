@@ -44,7 +44,7 @@ This will produce a more verbose version of JSON that is more recognizable by fo
 ]
 ```  
 In addition to normal JSON you can also export csv and table formats of the Log Analytics data
-```
+```bash
 ❯ python az-query-log-analtyics.py -t PT12H -o csv <<EOF                                            
 Heartbeat
 | project Computer, OSType, OSMajorVersion
@@ -55,7 +55,7 @@ Computer,OSType,OSMajorVersion
 lin-7599,Linux,18
 lin-7599,Linux,18
 ```
-```
+```bash
 ❯ python az-query-log-analtyics.py -t PT12H -o table <<EOF
 Heartbeat                                                                                                           
 | project Computer, OSType, OSMajorVersion                                                                          
