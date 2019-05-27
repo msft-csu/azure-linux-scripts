@@ -6,12 +6,13 @@ az-json-to-log-analytics will accept either a json file or json from stdin and l
 
 `curl https://jsonplaceholder.typicode.com/comments | az-json-to-log-analytics.py  -w "zzzzzzzzzzzzzzzzzz" -k "xxxxxxxxxxxxxxxxxxxxxxx" -l comments `
 
-Where:
-  -w Log Analytics workspace id
-  -k Log Analytics key
-  -l Log Analytics record type
+Where:  
+  -w Log Analytics workspace id  
+  -k Log Analytics key  
+  -l Log Analytics record type  
+  
   
 You can also set environment variables instead of passing on the command line.  This script will accept the following:
-LOG_ANALYTICS_WORKSPACE_ID
-AZURE_ANALYTICS_LOGTYPE
-AZURE_ANALYTICS_KEY
+  LOG_ANALYTICS_WORKSPACE_ID  
+  AZURE_ANALYTICS_LOGTYPE  
+  AZURE_ANALYTICS_KEY  
