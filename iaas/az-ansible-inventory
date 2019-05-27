@@ -1,0 +1,53 @@
+#!/bin/bash
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "   This script grabs all the VMs in a subscription and adds them to an Ansible inventory file"
+    echo "   using the Resource Group name as Ansible groups for the VMs"
+    echo "     [-f <filename>] file to output ansible inventory to"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts f: option
+do
+    case "${option}"
+    in
+        f) FILENAME=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z "$FILENAME" ]; then
+  usage
+  exit 1
+fi
+
+if [ -f "$FILENAME" ]; then
+  echo "ERROR:  File already exists"
+  exit 1
+fi
+
+OUTPUT=$(az vm list-ip-addresses -o json --query "[].{ResourceGroup:virtualMachine.resourceGroup,IPAddress:virtualMachine.network.publicIpAddresses[0].ipAddress}" -o tsv)
+
+while IFS= read
+do
+  RG=$(echo "$REPLY" | cut -f 1)
+  IP=$(echo "$REPLY" | cut -f 2)
+  if [[ $LASTRG != $RG ]]; then
+    echo "[$RG]" >>  $FILENAME
+  fi
+  echo "$IP" >> $FILENAME
+  LASTRG=$RG
+done <<< "$OUTPUT"

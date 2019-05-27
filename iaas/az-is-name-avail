@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+
+import click
+import requests
+import json
+
+def send_authenticated_req(url, bearer_token, body, debug):
+    headers = {   
+        f"Content-Type":f"application/json",
+        f"Authorization":f"Bearer {bearer_token}"
+    }
+    if debug:
+        print(f"{url}")
+        print(f"{headers}")
+        print(f"{body}")
+
+    response = requests.post(url, headers=headers, data=json.dumps(body))
+    return response
+
+def check_sa_name(add, name_to_check, bearer_token, subscription_id, debug):
+    url = f'{add}/subscriptions/{subscription_id}/providers/Microsoft.Storage/checkNameAvailability?api-version=2018-11-01'
+
+    body = {
+        f"Name":f"{name_to_check}",
+        f"Type":f"Microsoft.Storage/storageAccounts"
+    }
+    response = send_authenticated_req(url, bearer_token, body, debug)
+    return response.json()
+
+def check_web_name(add, name_to_check, bearer_token, subscription_id, debug):
+    url = f'{add}/subscriptions/{subscription_id}/providers/Microsoft.Web/checkNameAvailability?api-version=2018-02-01'
+    body = {
+        f"name":f"{name_to_check}",
+        f"isFQDN":True,
+        f"type":f"Site"
+    }
+    response = send_authenticated_req(url, bearer_token, body, debug)
+    return response.json()
+
+def get_token(add, resource, tenant_id, client_id, secret_key ):
+    url = f"{add}/{tenant_id}/oauth2/token"
+    grant_type=f"client_credentials"
+    resource=f"{resource}"
+    body = {
+        f"grant_type":f"{grant_type}",
+        f"client_id":f"{client_id}",
+        f"client_secret":f"{secret_key}",
+        f"resource":f"{resource}"
+    }
+    response = requests.post(url, data=body)
+    data=response.json()
+    #print(f"{data['access_token']}")
+    return data["access_token"]
+
+
+@click.command()
+@click.argument('name_to_check')
+@click.option(
+    '--azure_auth', '-a', 
+    type=click.Path(exists=True), 
+    required=True, 
+    envvar='AZURE_AUTH_LOCATION', 
+    help='Azure auth file formated in JSON'
+)
+@click.option(
+    '--debug', 
+    is_flag=True, 
+    help="Boolean flag that turns on additional output"
+)
+def main(name_to_check, azure_auth, debug):
+    """
+    A little tool that checks the storage acct name against the MSFT REST API
+    to determine if the name is available or not
+    """
+    with open(azure_auth, "r") as json_file:
+        auth_info = json.load(json_file)
+
+    if auth_info["resourceManagerEndpointUrl"].endswith('net/'):
+        domain=f"azurewebsites.us"
+    elif auth_info["resourceManagerEndpointUrl"].endswith('com/'):
+        domain=f"azurewebsites.net"
+    else:
+        raise Exception('Unsupported Azure Auth file')
+
+    bearer_token=get_token(
+            auth_info["activeDirectoryEndpointUrl"], 
+            auth_info["resourceManagerEndpointUrl"],
+            auth_info["tenantId"], 
+            auth_info["clientId"], 
+            auth_info["clientSecret"]
+        )
+    if debug:
+        print(f"Token: {bearer_token}\n")
+
+    sa_resp = check_sa_name(
+                auth_info["resourceManagerEndpointUrl"],
+                name_to_check, 
+                bearer_token, 
+                auth_info["subscriptionId"],
+                debug
+              )
+    if debug:
+        print(f"Storage Query Response: {sa_resp}\n")
+
+    web_resp = check_web_name(
+                  auth_info["resourceManagerEndpointUrl"],
+                  f"{name_to_check}.{domain}",
+                  bearer_token, 
+                  auth_info["subscriptionId"],
+                  debug
+               )
+    if debug:
+        print(f"Web Query Response: {web_resp}\n")
+    
+    sa_avail=sa_resp["nameAvailable"]
+    web_avail=web_resp["nameAvailable"]
+    print(f"Name Check for: {name_to_check}")
+    print(f"StorageAccount Available: {sa_avail}")
+    print(f"Website Available ({name_to_check}.{domain}): {web_avail}")
+
+
+if __name__ == "__main__":
+    main()

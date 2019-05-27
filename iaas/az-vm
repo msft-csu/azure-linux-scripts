@@ -1,0 +1,318 @@
+#!/bin/bash 
+NET=myVnet
+SUB=mySubNet
+IP=myPublicIP
+NSG=myNetworkSecurityGrp
+NIC=myNic
+SIZE=Standard_B2ms
+IMAGE=UbuntuLTS
+USERNAME=azuser
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-w] create a Windows VM.  Ubuntu is the default"
+    echo "     [-c <num>] how many VMs to create"
+    echo "     [-g <group>] resource group to use"
+    echo "     [-r <region>] region to use"
+    echo "     [-s <vm-size-by-type>] Azure VM size. Standard_DS2_v2 is default"
+    echo "     [-i <image name>] Azure image to base VM off of"
+    echo "     [-d <custom data>] cloud-init script to execute"
+    echo "     [-n <vm name>] name for the VM.  Defaults are supplied if not provided"
+    echo "     [-u <username>] username created on the VM. Defaults are supplied if not provided"
+    echo "     [-a <storage acct>] storage account for VM analytics.  No analytics are reported if not provided."
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts g:wr:c:s:i:d:n:u:a: option
+do
+    case "${option}"
+    in
+        g) RG=${OPTARG};;
+        w) WINDOWS=true;;
+        r) REGION=${OPTARG};;
+        c) COUNT=${OPTARG};;
+        s) SIZE=${OPTARG};;
+        i) IMAGE_PASSED=${OPTARG};;
+        d) CUSTOM_DATA=${OPTARG};;
+        n) VNAME=${OPTARG};;
+        u) USERNAME=${OPTARG};;
+        a) STORAGE_ACCT=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+#CURRENT_SUBSCRIPTION="/subscriptions/$(az account show --query "id" -o tsv)"
+#echo "Subscription=$CURRENT_SUBSCRIPTION"
+
+# Set Count for number of VMs being created.  Default is 1
+if [ -z $COUNT ]; then
+    COUNT=1
+else
+    if [ $COUNT -lt 1 ]; then
+        echo "-c must be equal or greater than 1"
+        exit 1
+    else
+        COUNT=$COUNT
+    fi
+fi
+
+# Test that any custom data that is passed in exists
+if ! [ -z "$CUSTOM_DATA" ]; then
+    if [ -f "$CUSTOM_DATA" ]; then
+        CUSTOM_DATA="--custom-data $CUSTOM_DATA"
+    else   
+        echo "Custom Data file does not exist"
+        exit 1
+    fi
+fi
+
+# Test that a passed in storage account exists
+if ! [ -z "$STORAGE_ACCT" ]; then
+    STORAGE_EXISTS=$(az storage account show -n $STORAGE_ACCT &>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "Exiting.  Storage account not found"
+        exit 1
+    fi
+fi
+
+
+# Check if Resource Group has been passed in, if not we will create one
+if [ -z "$RG" ]; then
+    RG=RG-$RANDOM
+else
+    echo "Checking Existing Stuff"
+    EXISTING_RG=`az group show -g $RG -o json | jq -r '.name'`
+    if ! [ -z "$EXISTING_RG" ]; then
+        EXISTS=true
+        # Only get the first one from the resource group.  Too bad if it's wrong.
+        EXISTING_VNET=`az network vnet list -g $RG -o json | jq -r '.[0].name'`
+        if [ $EXISTING_VNET == null ]; then
+            echo "No VNET found in ResourceGroup"
+            exit 1
+        fi
+        EXISTING_SUBNET=`az network vnet subnet list -g $RG --vnet-name $EXISTING_VNET -o json | jq -r '.[0].name'`
+        if [ $EXISTING_SUBNET == null ]; then
+            echo "VNet must have a Subnet to continue"
+            exit 1
+        fi
+        EXISTING_NSG=`az network nsg list -g $RG -o json | jq -r '.[0].name'`
+        if [ $EXISTING_VNET == null ] || [ $EXISTING_NSG == null ]; then
+            echo "Must have a Security Group with 22 and 3389 open to continue"
+            exit 1
+        fi
+        OPEN_PORTS=$(az network nsg list -g $RG -o json)
+        SSH_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "22")')
+        RDP_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "3389")')
+        if [ -z "$SSH_PORT" ] || [ -z "$RDP_PORT" ]; then
+            echo "This script requires port 22 and 3389"
+            exit 1
+        fi
+
+        VNET=$EXISTING_VNET
+        SUB=$EXISTING_SUBNET
+        NSG=$EXISTING_NSG
+    fi
+fi
+
+# Check if Region is passed in, otherwise eastus will be used
+if [ -z "$REGION" ]; then
+    REGION='eastus'
+fi
+
+# Test the imaged passed in
+if ! [ -z "$IMAGE_PASSED" ]; then
+    IMAGE_EXISTS=$(az image show --ids $IMAGE_PASSED -o json) 2>/dev/null
+    if [ -z "$IMAGE_EXISTS" ]; then
+        # HACK ALERT:  More than one can exist but only taking the first one
+        # Look to see if a short name was passed and if it exists. 
+        IMAGE_ID=$(az image list -o json | jq -r --arg ARG $IMAGE_PASSED '.[] | select(.name == $ARG) | .id' | head -n 1)
+        if [ -z "$IMAGE_ID" ]; then
+            echo "Image was not found in available resource groups.  Please select another image."
+            exit 1
+        else
+            IMAGE_PASSED=$IMAGE_ID
+        fi
+    fi
+fi
+
+if [ $WINDOWS ]; then
+    if [ -z "$IMAGE_PASSED" ]; then
+        IMAGE='win2016datacenter'
+    else
+        IMAGE=$IMAGE_PASSED
+    fi
+    if [ -z "$VNAME" ]; then
+        VM='win'
+    fi
+    PASSWORD_STR="--admin-password ChangePassIShould!!"
+else
+    if [ -z "$IMAGE_PASSED" ]; then
+        IMAGE='UbuntuLTS'
+    else
+        IMAGE=$IMAGE_PASSED
+    fi
+    if [ -z "$VNAME" ]; then
+        VM='lin'
+    fi
+    PASSWORD_STR="--ssh-key-value ~/.ssh/id_rsa.pub"
+fi
+
+echo "Using Image=$IMAGE_ID"
+# To debug which image is going to be created
+#echo "Selected image=$IMAGE"
+#exit 1
+
+# Create a resource group.
+if ! [ $EXISTS ]; then
+    echo "Creating Resource Group $RG..."
+    az group create --name $RG --location $REGION 1> /dev/null || exit 1
+fi
+
+GROUP_ID=$(az group show -g $RG --query "id" -o tsv)
+
+# Create a virtual network.
+if ! [ $EXISTS ]; then
+    echo "Creating Vnet $NET..."
+    az network vnet create --resource-group $RG --name $NET --subnet-name $SUB 1> /dev/null || exit 1
+fi
+
+# Create a network security group.
+if ! [ $EXISTS ]; then
+    echo "Creating Security Group $NSG..."
+    az network nsg create --resource-group $RG --name $NSG 1> /dev/null || exit 1
+    
+    # This a total hack to generate a random priority.  Could have random failures using this random priority 
+    #PRIORITY=`az network nsg rule list -g $RG --nsg-name myNetworkSecurityGrp -o json | jq -r '.[].priority' | sort -nr | head -n 1`
+
+    # Create a Network security rule for access
+    # Both Windows and Linux rules are created by default
+    echo "Creating a security rule for SSH and RDP..."
+
+    az network nsg rule create \
+        --resource-group $RG \
+        --nsg-name $NSG \
+        --name SSH \
+        --protocol tcp \
+        --priority 100 \
+        --destination-port-range 22 1> /dev/null || exit 1
+
+    az network nsg rule create \
+        --resource-group $RG \
+        --nsg-name $NSG \
+        --name RDP \
+        --protocol tcp \
+        --priority 110 \
+        --destination-port-range 3389 1> /dev/null || exit 1 
+
+    echo "Binding security group to subnet..."
+    az network vnet subnet update \
+        --resource-group $RG \
+        --vnet-name $NET \
+        --name $SUB \
+        --network-security-group $NSG 1> /dev/null || exit 1
+fi
+
+declare -a VMSTACK=()
+
+for i in `seq 1 $COUNT`; do
+    RAND=$RANDOM
+    if [ -z "$VNAME" ]; then
+        VMNAME=$VM-$RAND
+    else
+        #if [ $i -eq 1 ]; then
+        if [ $COUNT -eq 1 ]; then
+            VMNAME=$VNAME
+        else
+            VMNAME=$VNAME-$i
+        fi
+    fi
+    # Create a public IP address.
+    echo "Creating PublicIP $IP-$RAND..."
+    az network public-ip create --resource-group $RG --name $IP-$RAND 1> /dev/null || exit 1
+
+    # Create a virtual network card and associate with public IP address and NSG.
+    echo "Creating Nic $NIC-$RAND..."
+    az network nic create \
+      --resource-group $RG \
+      --name $NIC-$RAND \
+      --vnet-name $NET \
+      --subnet $SUB \
+      --network-security-group $NSG \
+      --public-ip-address $IP-$RAND 1> /dev/null || exit 1
+
+    # Create a new virtual machine, this creates SSH keys if not present.
+    echo "Creating VM $VMNAME..."
+    az vm create \
+      --resource-group $RG \
+      --name $VMNAME \
+      --nics $NIC-$RAND \
+      --image $IMAGE \
+      --size $SIZE \
+      --admin-username $USERNAME \
+      --assign-identity \
+      --scope $GROUP_ID \
+      --role owner \
+      $PASSWORD_STR $CUSTOM_DATA 1>/dev/null || exit 1
+
+    # Add VM to an array for later use.  This is primarily so that cloud-init
+    # can complete before trying to setup analytics.  By processing the test 
+    # of cloud-init later it just means it has a better chance of being done.
+    VMSTACK=( "${VMSTACK[@]}" "$VMNAME" )
+done
+
+# Sleep a bit before testing for boot-finished
+sleep 10
+if ! [ -z "$STORAGE_ACCT" ]; then
+    START_TIME=$(date -d yesterday +%Y-%m-%dT00:00:01Z)
+    for vm in "${VMSTACK[@]}"; do
+        if ! [ $WINDOWS ]; then
+            echo "Testing $vm for cloud-init completion"
+            # Test to ensure cloud-init is finished otherwise setting up diagnostics will fail
+            until az vm run-command invoke -g $RG -n $vm --command-id RunShellScript --scripts "[ -f /var/lib/cloud/instance/boot-finished ] && echo true || echo false" -o json &> /dev/null
+            do
+                echo "still processing cloud-init... sleeping"
+                sleep 20
+            done
+        fi
+
+        VM_RESOURCE_ID=$(az vm show -g $RG -n $vm --query "id" -o tsv) 1>/dev/null || exit 1
+                                
+        DEFAULT_CONFIG=$(az vm diagnostics get-default-config -o json \
+            | sed "s|__DIAGNOSTIC_STORAGE_ACCOUNT__|$STORAGE_ACCT|g" \
+            | sed "s|__VM_OR_VMSS_RESOURCE_ID__|$VM_RESOURCE_ID|g") 2>/dev/null || exit 1
+
+        if [ -z "$SASTOKEN" ]; then
+            SASTOKEN=$(az storage account generate-sas \
+                --account-name $STORAGE_ACCT --expiry 2037-12-31T23:59:00Z --start $START_TIME \
+                --permissions wlacu --resource-types co --services bt -o tsv) 1>/dev/null || exit 1
+        fi
+
+        #echo "$SASTOKEN"
+
+        if [ -z "$PROTECTED_SETTINGS" ]; then
+            PROTECTED_SETTINGS="{'storageAccountName': '$STORAGE_ACCT', \
+                'storageAccountSasToken': '$SASTOKEN'}"
+        fi
+        
+        echo "Connecting VM to Diagnostics in Storage Account: $STORAGE_ACCT"
+        az vm diagnostics set --settings "$DEFAULT_CONFIG" \
+            --protected-settings "$PROTECTED_SETTINGS" \
+            --resource-group $RG --vm-name $vm 1>/dev/null || exit 1
+
+    done
+fi
+
+
+az vm list-ip-addresses -g $RG --output table

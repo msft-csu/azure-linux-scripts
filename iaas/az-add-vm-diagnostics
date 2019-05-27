@@ -1,0 +1,71 @@
+#!/bin/bash
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-a <storage acct>] Storage acct to write diagnostics to."
+    echo "     [-n <vmname>] VM name to enable diagnostics on"
+    echo "     [-g <resource group>] Resource group VM is in"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts a:n:g: option
+do
+    case "${option}"
+    in
+        g) RG=${OPTARG};;
+        n) VMNAME=${OPTARG};;
+        a) STORAGE_ACCT=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z "$RG" ] || [ -z "$VMNAME" ] || [ -z "$STORAGE_ACCT" ]; then
+    echo "-a <storage acct> -n <vmname> -g <resource group> all required parameters"
+    usage
+fi
+
+# Test that a passed in storage account exists
+if ! [ -z "$STORAGE_ACCT" ]; then
+    STORAGE_EXISTS=$(az storage account show -n $STORAGE_ACCT &>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "Exiting.  Storage account not found"
+        exit 1
+    fi
+fi
+
+VM_RESOURCE_ID=$(az vm show -g $RG -n $VMNAME --query "id" -o tsv) 1>/dev/null || exit 1
+                                
+DEFAULT_CONFIG=$(az vm diagnostics get-default-config -o json \
+    | sed "s|__DIAGNOSTIC_STORAGE_ACCOUNT__|$STORAGE_ACCT|g" \
+    | sed "s|__VM_OR_VMSS_RESOURCE_ID__|$VM_RESOURCE_ID|g") 2>/dev/null || exit 1
+
+if [ -z "$SASTOKEN" ]; then
+    SASTOKEN=$(az storage account generate-sas \
+        --account-name $STORAGE_ACCT --expiry 2037-12-31T23:59:00Z  \
+        --permissions wlacu --resource-types co --services bt -o tsv) 1>/dev/null || exit 1
+fi
+
+echo "$SASTOKEN"
+
+if [ -z "$PROTECTED_SETTINGS" ]; then
+    PROTECTED_SETTINGS="{'storageAccountName': '$STORAGE_ACCT', \
+        'storageAccountSasToken': '$SASTOKEN'}"
+fi
+                        
+az vm diagnostics set --settings "$DEFAULT_CONFIG" \
+    --protected-settings "$PROTECTED_SETTINGS" \
+    --resource-group $RG --vm-name $VMNAME 1>/dev/null || exit 1
+
+echo "Connecting VM to Diagnostics in Storage Account: $STORAGE_ACCT"

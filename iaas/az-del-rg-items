@@ -1,0 +1,31 @@
+#!/bin/zsh    
+if ! [ "$#" -eq 1 ]; then
+    echo "This will delete all resources in a Azure Resource Group."
+    echo ""
+    echo "Usage: az-delete-rg-resources <resource_group>"
+    echo ""
+    echo "Must pass a single Azure Resource Group"
+    return 1
+fi
+RND_FILE=`cat /dev/urandom | tr -dc '0-9a-zA-Z' | head -c 20`
+tee /tmp/$RND_FILE <<'EOF' > /dev/null
+{
+"$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+"contentVersion": "1.0.0.0",
+"parameters": {   },
+"variables": {  },
+"resources": [  ],
+"outputs": {  }
+}
+EOF
+az resource list -g $1 --output table
+if ! [ $? -eq 0 ]; then;
+    return 1
+fi
+vared -p 'Continuing will delete these resources permanently.  Do you want to continue?  ' -c ans
+ans=`echo $ans | tr "[:upper:]" "[:lower:]"`
+if [[ $ans == 'y' || $ans == 'yes' ]]; then
+    echo 'Deleting resources'
+    az group deployment create -g $1 --template-file /tmp/$RND_FILE --mode Complete
+fi
+rm -f /tmp/$RND_FILE

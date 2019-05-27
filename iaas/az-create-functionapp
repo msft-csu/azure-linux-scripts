@@ -1,0 +1,261 @@
+#!/bin/bash 
+# az-create-functionapp - Author: Brent McConnell
+# 
+#
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for
+# license information.
+# 
+# Creates a Linux based FunctionApp that uses consumption pricing in eastus from CLI.  
+# Requires a unique name and type of runtime 
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     -n <unique name>: Name for resourcegroup, function and storage acct"
+    echo "     -t <runtime>: Runtime.  Can be one of [dotnet, java, node, python]"
+    echo "     -p <os>: Operating system.  Can be one of [linux, windows]. Default is Linux"
+    echo ""
+    echo "     Resource group of <name> will be created.  'fa' will be appended"
+    echo "     to the FunctionApp name.  'sa' will be appended to the storage acct name"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts n:t:p: option
+do
+    case "${option}"
+    in
+        n) RG_NAME=${OPTARG};;
+        t) RUNTIME=${OPTARG};;
+        p) PLATFORM=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z "$RG_NAME" ]; then
+    echo "ERROR: Must provide -n <Unique Name>"
+    exit 1
+fi 
+
+if [[ $RG_NAME =~ ['!@#$%^&*()_+-'] ]]; then
+  echo "ERROR:  Name cannot contain any special characters or dashes"
+  exit 1
+fi
+
+FUNC_NAME="$RG_NAME"fa
+STOR_NAME="$RG_NAME"sa
+
+if [ -z "$RUNTIME" ]; then
+    echo "ERROR: Must provide -r <runtime>.  One of [ dotnet, python, node, java ]"
+fi 
+
+if [ -z "$PLATFORM" ]; then
+    echo "Using default platform of Linux.  Use -p Windows if Windows is your preferred platform"
+    echo "Waiting 5 seconds before continuing"
+    PLATFORM="Linux"
+    sleep 5
+fi
+
+VALID_RUNTIME=(
+    'dotnet'
+    'java'
+    'python'
+    'node'
+)
+PLATFORM=$(echo $PLATFORM | awk '{print toupper(substr($0,0,1))tolower(substr($0,2))}')
+
+VALID_OS=(
+    'Linux'
+    'Windows'
+)
+
+if ! [[ " ${VALID_RUNTIME[@]} " =~ " $RUNTIME " ]]; then
+    echo "ERROR: Can only be one of [ dotnet, python, node, java ]"
+    usage 
+fi
+
+if ! [[ " ${VALID_OS[@]} " =~ " $PLATFORM " ]]; then
+    echo "ERROR: Can only be one of [ linux, windows ]"
+    usage 
+fi
+
+# Check Which Cloud
+WHICH_CLOUD=$(az cloud list --query "[].{Active:isActive, Name:name}[?Active==\`true\`]" -o tsv | awk '{print $2}')
+echo "Running against $WHICH_CLOUD"
+
+if [ -z "$AZURE_AUTH_LOCATION" ]; then
+    echo "AZURE_AUTH_LOCATION not set.  Looking for .azureauth file in $HOME as fallback."
+    if [ -f "$HOME/.azureauth" ]; then
+        echo "Using $HOME/.azureauth for authenticating REST calls"
+        AZURE_AUTH_LOCATION=$HOME/.azureauth
+    fi
+fi
+
+if [ -z "$AZURE_AUTH_LOCATION" ]; then
+    echo "ERROR: AZURE_AUTH_LOCATION env variable or .azureauth file not found."
+    echo "       Use az ad sp create-for-rback --sdk-auth to create and store"
+    exit 1
+else
+    if ! [ -f "$AZURE_AUTH_LOCATION" ]; then
+        echo "$AZURE_AUTH_LOCATION does NOT exist. Ensure that AZURE_AUTH_ENVIRONMENT contains valid sp info"
+        exit 1
+    fi
+fi
+
+clientId=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.clientId != null) | .clientId')
+subscriptionId=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.subscriptionId != null) | .subscriptionId')
+tenantId=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.tenantId != null) | .tenantId')
+secretKey=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.clientSecret != null) | .clientSecret')
+activeDirectoryEndpoint=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.activeDirectoryEndpointUrl != null) | .activeDirectoryEndpointUrl')
+resourceManagerEndpoint=$(cat $AZURE_AUTH_LOCATION | jq -e -r 'select(.resourceManagerEndpointUrl != null) | .resourceManagerEndpointUrl')
+#echo $activeDirectoryEndpoint
+#echo $resourceManagerEndpoint
+
+if [ -z "$clientId" ]  || [ -z "$subscriptionId" ] || [ -z "$tenantId" ] || [ -z "$secretKey" ] ; then
+    echo "File does not contain one or more of the following:"
+    echo "clientId, subscriptionId, tenantId and/or clientSecret"
+    exit 1
+fi
+
+function az-rg-exists() {
+    EXISTING_RG=`az group show -g $RG_NAME -o json | jq -r '.name'`
+    if [ -z "$EXISTING_RG" ]; then
+        return 1 
+    fi
+    return 0
+}
+
+function az-sa-exists() {
+    EXISTING_SA=`az storage account show -n $STOR_NAME -o json | jq -r '.name'`
+    if [ -z "$EXISTING_SA" ]; then
+        return 1
+    fi
+    return 0
+}
+
+function az-fa-exists() {
+    EXISTING_FA=`az functionapp show -n $FUNC_NAME -g $RG_NAME -o json | jq -r '.name'`
+    if [ -z "$EXISTING_FA" ]; then
+        return 1
+    fi
+    return 0
+}
+
+if [ $WHICH_CLOUD == 'AzureCloud' ]; then
+    TLD="net"
+    REGION="eastus"
+elif [ $WHICH_CLOUD == 'AzureUSGovernment' ]; then
+    TLD="us"
+    REGION="usgovvirginia"
+else
+    echo "Cloud Not Supported"
+    exit 1
+fi
+
+RESP=$(curl -s -X POST \
+    -d"grant_type=client_credentials&client_id=$clientId&client_secret=$secretKey&resource=$resourceManagerEndpoint" \
+    $activeDirectoryEndpoint/$tenantId/oauth2/token)
+
+TOKEN=$(echo $RESP | jq -r ".access_token")
+#echo $TOKEN
+
+if [ -z "$TOKEN" ]; then
+    echo "Error: Failed to get AUTH Token for REST calls"
+    exit 1
+fi
+
+echo "Sending HTTP POST Request to check FunctionApp resourcename............."
+WEB_AVAILABLE=$(curl -s -S \
+    -H "Content-Type: application/json; charset=UTF-8"\
+    -H "Authorization: Bearer $TOKEN"\
+    -XPOST $resourceManagerEndpoint/subscriptions/$subscriptionId/providers/Microsoft.Web/checkNameAvailability?api-version=2018-11-01 \
+    -d'{
+        "name": '\""$FUNC_NAME".azurewebsites."$TLD"\"',
+        "isFQDN": true,
+        "type": "Site"
+    }' | jq -r ".nameAvailable") &> /dev/null || exit 1
+
+if [ "$WEB_AVAILABLE" == "false" ]; then
+    echo "Website Name Already Exists. Select another name"
+    exit 1
+fi
+
+
+echo "Sending HTTP POST Request to Storage resourcename............."
+SA_AVAILABLE=$(curl -s \
+    -H "Content-Type: application/json; charset=UTF-8"\
+    -H "Authorization: Bearer $TOKEN"\
+    -XPOST $resourceManagerEndpoint/subscriptions/$subscriptionId/providers/Microsoft.Storage/checkNameAvailability?api-version=2018-11-01 \
+    -d'{
+        "Name": '\""$STOR_NAME"\"',
+        "Type": "Microsoft.Storage/storageAccounts"
+    }' | jq -r ".nameAvailable")
+
+if [ "$SA_AVAILABLE" == "false" ]; then
+    echo "Storage Account Already Exists. Select another name"
+    exit 1
+fi
+
+if az-rg-exists $RG_NAME; then
+    echo "Error: Resource Group Exists"
+    exit 1
+fi
+
+if az-sa-exists $STOR_NAME; then
+    echo "Error: Storage Acct Exists"
+    exit 1
+fi
+
+if az-fa-exists $FUNC_NAME; then
+    echo "Error: FunctionApp already exists"
+fi
+
+
+az group create \
+    --name $RG_NAME \
+    --location $REGION 1> /dev/null || exit 1
+
+az storage account create \
+    --name $STOR_NAME \
+    --location $REGION \
+    --resource-group $RG_NAME \
+    --sku Standard_LRS 1> /dev/null || exit 1
+
+echo "Storage Acct $STOR_NAME created successfully"
+
+az functionapp create \
+    --consumption-plan-location $REGION \
+    --name $FUNC_NAME \
+    --os-type $PLATFORM \
+    --resource-group $RG_NAME \
+    --runtime $RUNTIME \
+    --storage-account $STOR_NAME 1> /dev/null || exit 1
+
+echo "Function App $FUNC_NAME created successfully"
+
+# Creates insights component for monitoring. Note generated instrumentation key
+# is set in function app.
+az resource create \
+    --resource-group $RG_NAME \
+    --resource-type "Microsoft.Insights/components" \
+    --name $FUNC_NAME-ai \
+    --location $REGION \
+    --properties '{"Application_Type":"web"}' -o json \
+| jq -r ".properties.InstrumentationKey" \
+| xargs -I % az functionapp config appsettings set \
+    --name $FUNC_NAME \
+    --resource-group $RG_NAME \
+    --settings "APPINSIGHTS_INSTRUMENTATIONKEY = %" || exit 1
+
+echo "Application Insights configured"
