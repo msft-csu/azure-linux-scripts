@@ -2,7 +2,7 @@
 
 import click
 import requests
-import json 
+import json
 import datetime
 import hashlib
 import hmac
@@ -14,7 +14,7 @@ import os
 import codecs
 
 # Block needed to debug HTTP requests in Python3
-#import logging 
+#import logging
 #import http.client as http_client
 
 #http_client.HTTPConnection.debuglevel = 1
@@ -26,7 +26,7 @@ import codecs
 #requests_log.propagate = True
 # End Block needed
 
-log_file_columns = [   
+log_file_columns = [
                         "version-number",
                         "request-start-time",
                         "operation-type",
@@ -128,15 +128,15 @@ def send_to_log_analytics(workspace_id, key, json_data, log_type):
 @click.argument('ingestion_file',
     type=click.Path(exists=True)
 )
-@click.option('--workspace_id', '-w', 
+@click.option('--workspace_id', '-w',
     required=True,
     envvar='AZURE_ANALYTICS_WORKSPACE_ID',
     help="Provide the Log Analytics Workspace ID"
 )
-@click.option('--azure_auth', '-a', 
-    type=click.Path(exists=True), 
-    required=True, 
-    envvar='AZURE_AUTH_LOCATION', 
+@click.option('--azure_auth', '-a',
+    type=click.Path(exists=True),
+    required=True,
+    envvar='AZURE_AUTH_LOCATION',
     help='Azure auth file formated in JSON'
 )
 @click.option('--key', '-k',
@@ -145,8 +145,8 @@ def send_to_log_analytics(workspace_id, key, json_data, log_type):
     help="Provide the Log Analytics Shared Key"
 )
 @click.option('--debug', '-d',
-    default=False, 
-    is_flag=True, 
+    default=False,
+    is_flag=True,
     help="Boolean flag that turns on additional output"
 )
 def main(ingestion_file, workspace_id, azure_auth, key, debug):
@@ -159,7 +159,6 @@ def main(ingestion_file, workspace_id, azure_auth, key, debug):
     tenant_id=auth_info["tenantId"]
     client_id=auth_info["clientId"]
     secret_key=auth_info["clientSecret"]
-    
     json_data = get_file_data(ingestion_file)
 
     log_type = "StorageAccountAuditTest"

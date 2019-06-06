@@ -2,7 +2,7 @@
 
 import click
 import requests
-import json 
+import json
 import datetime
 import hashlib
 import hmac
@@ -11,7 +11,7 @@ import codecs
 import sys
 
 # Block needed to debug HTTP requests in Python3
-import logging 
+import logging
 import http.client as http_client
 
 http_client.HTTPConnection.debuglevel = 1
@@ -91,13 +91,13 @@ def get_ingestion_data(filename):
     type=click.Path(exists=True),
     required=False
 )
-@click.option('--workspace_id', '-w', 
+@click.option('--workspace_id', '-w',
     required=True,
     envvar='LOG_ANALYTICS_WORKSPACE_ID',
     help="Provide the Log Analytics Workspace ID"
 )
 @click.option('--logtype', '-l',
-    required=True, 
+    required=True,
     envvar='AZURE_ANALYTICS_LOGTYPE',
     help="Logtype that will be ingested into LogAnalytics"
 )
@@ -107,24 +107,23 @@ def get_ingestion_data(filename):
     help="Provide the Log Analytics Shared Key"
 )
 @click.option('--debug', '-d',
-    default=False, 
-    is_flag=True, 
+    default=False,
+    is_flag=True,
     help="Boolean flag that turns on additional output"
 )
 def main(ingestion_file, workspace_id, logtype, key, debug):
     """
     A little tool that writes valid JSON to Log Analytics via REST API calls
     """
-    
     json_data = None
     if not ingestion_file:
         try:
             data = json.load(sys.stdin)
             json_data = json.dumps(data)
         except json.decoder.JSONDecodeError:
-            print(f"ERROR:  Input should be valid JSON") 
+            print(f"ERROR:  Input should be valid JSON")
             raise
-    else:    
+    else:
         json_data = get_ingestion_data(ingestion_file)
 
     print(f"{json_data}")
