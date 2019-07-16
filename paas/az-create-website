@@ -6,7 +6,7 @@
 # Licensed under the MIT License. See License.txt in the project root for
 # license information.
 # 
-# Creates a website using an Azure Storage Acct in eastus... for now.
+# Creates a website using a provided Resource Group and Azure Storage Acct.
 
 usage() { 
     echo "`basename $0`"
