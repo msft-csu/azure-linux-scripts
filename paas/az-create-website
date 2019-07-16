@@ -207,4 +207,8 @@ az cdn custom-domain create --endpoint-name ${STOR_NAME} \
     --profile-name ${STOR_NAME}cdn \
     --resource-group $RG_NAME
 
-echo "The End"
+echo "Enabling SSL.  This will take about 8hrs"
+az cdn custom-domain enable-https --endpoint-name $STOR_NAME \
+    --name www \
+    --profile-name ${STOR_NAME}cdn \
+    --resource-group $RG_NAME || exit 1
