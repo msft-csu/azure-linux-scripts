@@ -14,7 +14,7 @@ usage() {
     echo "      -d <domain name>: Domain name of website."
     echo "      -g <resource group>: Existing Resource group."
     echo "      -s <storage acct>: Existing Storage account"
-    echo "  Note:  If passing in Storage account you must also pass in resource group"
+    echo "      -n : Does not prompt to continue but will fail if DNS is not correct"
     exit 1
 }
 
@@ -27,13 +27,14 @@ for arg in "$@"; do
   esac
 done
 
-while getopts d:g:s: option
+while getopts d:g:s:n option
 do
     case "${option}"
     in
         g) RG_NAME=${OPTARG};;
         d) DOMAIN_NAME=${OPTARG};;
         s) STOR_NAME=${OPTARG};;
+        n) PROMPT=0;;
         *) usage;;
         : ) usage;;
     esac
@@ -58,13 +59,32 @@ if [ -z "$RG_NAME" ]; then
     exit 1
 fi
 
-
 # Does the domain name at least look valid
 VALID_NAME=$(echo $DOMAIN_NAME | perl -nle'print if m{(?=^.{5,254}$)(^(?:(?!\d+\.)[a-zA-Z0-9_\-]{1,63}\.?)+(?:[a-zA-Z]{2,})$)}') 
 if [ -z "$VALID_NAME" ]; then
     echo "Domain name doesn't look valid to me"
     exit 1
 fi
+
+read -r -d '' PROMPT_MESSAGE <<EOF
+Have the following DNS records been created before running this script?:
+web.$DOMAIN_NAME -> $STOR_NAME.blob.core.windows.net
+www.$DOMAIN_NAME -> $STOR_NAME.azureedge.net
+[y/N]? 
+EOF
+
+if [ -z "$PROMPT" ]; then
+    read -p "$PROMPT_MESSAGE" ANSWER
+    if ! [[ $ANSWER =~ [yY](es)* ]]; then
+        echo "Please create these entries before continuing"
+        exit 0
+    fi
+fi
+
+echo "Moving on"
+
+exit 0
+
 
 echo "Checking for required www.${STOR_NAME} and web.$STOR_NAME records in DNS"
 (host -t CNAME www.${DOMAIN_NAME} | grep "${STOR_NAME}.azureedge.net" && host -t CNAME web.${DOMAIN_NAME} | grep "${STOR_NAME}.blob.core.windows.net") || {
