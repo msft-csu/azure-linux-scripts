@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash
 # az-create-website - Author: Brent McConnell
 # 
 #
@@ -11,10 +11,10 @@
 usage() { 
     echo "`basename $0`"
     echo "   Usage: " 
-    echo "      -l <location>: Region for storage acct"
-    echo "      -d <domain name>: domain name of website."
-    echo "      -g <resource group>: Resource group."
-    echo ""
+    echo "      -d <domain name>: Domain name of website."
+    echo "      -g <resource group>: Existing Resource group."
+    echo "      -s <storage acct>: Existing Storage account"
+    echo "  Note:  If passing in Storage account you must also pass in resource group"
     exit 1
 }
 
@@ -27,40 +27,80 @@ for arg in "$@"; do
   esac
 done
 
-while getopts l:d:g: option
+while getopts d:g:s: option
 do
     case "${option}"
     in
         g) RG_NAME=${OPTARG};;
-        t) DOMAIN=${OPTARG};;
-        l) REGION=${OPTARG};;
+        d) DOMAIN_NAME=${OPTARG};;
+        s) STOR_NAME=${OPTARG};;
         *) usage;;
         : ) usage;;
     esac
 done
 shift "$(($OPTIND -1))"
 
-# Check if Resource Group has been passed in, if not we will create one
+# Check to see if Domain was passed it at least
+if [ -z "$DOMAIN_NAME" ]; then
+    usage
+    exit 1
+fi
+
+# Check to see if RG was passed in
+if [ -z "$STOR_NAME" ]; then
+    usage
+    exit 1
+fi
+
+# Check to see if RG was passed in
 if [ -z "$RG_NAME" ]; then
-    RG_NAME=RG-$RANDOM
-else
-    echo "Checking Existing Resource Group"
-    EXISTING_RG=`az group show -g $RG -o json | jq -r '.name'`
-    if [ -z "$EXISTING_RG" ]; then
-        echo "Resource group passed in does not exist"
-        exit 1 
-    fi
+    usage
+    exit 1
 fi
 
- Check if Region is passed in, otherwise eastus will be used
-if [ -z "$REGION" ]; then
-    REGION='eastus'
+
+# Does the domain name at least look valid
+VALID_NAME=$(echo $DOMAIN_NAME | perl -nle'print if m{(?=^.{5,254}$)(^(?:(?!\d+\.)[a-zA-Z0-9_\-]{1,63}\.?)+(?:[a-zA-Z]{2,})$)}') 
+if [ -z "$VALID_NAME" ]; then
+    echo "Domain name doesn't look valid to me"
+    exit 1
 fi
 
-if [[ $RG_NAME =~ ['!@#$%^&*()_+-'] ]]; then
-  echo "ERROR:  Name cannot contain any special characters or dashes"
-  exit 1
+echo "Checking for required www.${STOR_NAME} and web.$STOR_NAME records in DNS"
+(host -t CNAME www.${DOMAIN_NAME} | grep "${STOR_NAME}.azureedge.net" && host -t CNAME web.${DOMAIN_NAME} | grep "${STOR_NAME}.blob.core.windows.net") || {
+    echo "FATAL ERROR: "
+    echo "====== Unable to locate web.${DOMAIN_NAME} or www.${DOMAIN_NAME} server entries in DNS"
+    echo "====== Create a CNAME entry for web.${DOMAIN_NAME} and www.${DOMAIN_NAME} with your DNS provider"
+    echo "====== web.${DOMAIN_NAME} should map to $STOR_NAME.blob.core.windows.net"
+    echo "====== www.${DOMAIN_NAME} should map to $STOR_NAME.azureedge.net"
+    exit 1
+}
+echo "DNS CNAME Records Found!!"
+
+# Check if Resource Group has been passed in, if not we will create one
+echo "Checking Existing Resource Group"
+EXISTING_RG=`az group show -g $RG_NAME -o json | jq -r '.name'`
+if [ -z "$EXISTING_RG" ]; then
+    echo "Resource group passed in does not exist"
+    exit 1 
 fi
+echo "Cool... Resource Group exists"
+
+echo "Checking Existing Storage Account"
+EXISTING_SA=`az storage account show -g $RG_NAME -n $STOR_NAME -o json | jq -r '.name'`
+if [ -z "$EXISTING_SA" ]; then
+    echo "ERROR: Storage account does not exist"
+    exit 1 
+fi
+echo "Cool... Storage account exists"
+
+az storage account show -g $RG_NAME -n $STOR_NAME -o json --query kind | grep StorageV2 >/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR: Storage acct must be of kind StorageV2" 
+    exit 1
+fi
+
+echo "Storage Account being used is $STOR_NAME"
 
 # Check Which Cloud
 WHICH_CLOUD=$(az cloud list --query "[].{Active:isActive, Name:name}[?Active==\`true\`]" -o tsv | awk '{print $2}')
@@ -100,30 +140,6 @@ if [ -z "$clientId" ]  || [ -z "$subscriptionId" ] || [ -z "$tenantId" ] || [ -z
     exit 1
 fi
 
-function az-rg-exists() {
-    EXISTING_RG=`az group show -g $RG_NAME -o json | jq -r '.name'`
-    if [ -z "$EXISTING_RG" ]; then
-        return 1 
-    fi
-    return 0
-}
-
-function az-sa-exists() {
-    EXISTING_SA=`az storage account show -n $STOR_NAME -o json | jq -r '.name'`
-    if [ -z "$EXISTING_SA" ]; then
-        return 1
-    fi
-    return 0
-}
-
-function az-fa-exists() {
-    EXISTING_FA=`az functionapp show -n $FUNC_NAME -g $RG_NAME -o json | jq -r '.name'`
-    if [ -z "$EXISTING_FA" ]; then
-        return 1
-    fi
-    return 0
-}
-
 if [ $WHICH_CLOUD == 'AzureCloud' ]; then
     TLD="net"
     REGION="eastus"
@@ -131,7 +147,7 @@ elif [ $WHICH_CLOUD == 'AzureUSGovernment' ]; then
     TLD="us"
     REGION="usgovvirginia"
 else
-    echo "Cloud Not Supported"
+    echo "ERROR: Cloud Not Supported"
     exit 1
 fi
 
@@ -140,94 +156,55 @@ RESP=$(curl -s -X POST \
     $activeDirectoryEndpoint/$tenantId/oauth2/token)
 
 TOKEN=$(echo $RESP | jq -r ".access_token")
-#echo $TOKEN
+echo $TOKEN
 
 if [ -z "$TOKEN" ]; then
-    echo "Error: Failed to get AUTH Token for REST calls"
+    echo "ERROR: Failed to get AUTH Token for REST calls"
     exit 1
 fi
 
-echo "Sending HTTP POST Request to check Storage Acct resourcename............."
-WEB_AVAILABLE=$(curl -s -S \
-    -H "Content-Type: application/json; charset=UTF-8"\
-    -H "Authorization: Bearer $TOKEN"\
-    -XPOST $resourceManagerEndpoint/subscriptions/$subscriptionId/providers/Microsoft.Web/checkNameAvailability?api-version=2018-11-01 \
-    -d'{
-        "name": '\""$FUNC_NAME".azurewebsites."$TLD"\"',
-        "isFQDN": true,
-        "type": "Site"
-    }' | jq -r ".nameAvailable") &> /dev/null || exit 1
+echo "Setting storage account property for custom domain"
+az storage account update --name $STOR_NAME \
+    --custom-domain web.${DOMAIN_NAME} \
+    --resource-group $RG_NAME 
 
-if [ "$WEB_AVAILABLE" == "false" ]; then
-    echo "Website Name Already Exists. Select another name"
+echo "Setting blob properties for static website"
+az storage blob service-properties update \
+    --account-name $STOR_NAME \
+    --static-website \
+    --404-document error.html \
+    --index-document index.html || exit 1
+
+WEB_ENDPOINT=$(az storage account show --name $STOR_NAME \
+    --output json \
+    --query primaryEndpoints.web)
+
+echo "Web endpoint for storage account is $WEB_ENDPOINT"
+WEB_DOMAIN=$(echo "$WEB_ENDPOINT" | sed -e 's|^[^/]*//||' -e 's|/.*$||')
+if [ -z "$WEB_DOMAIN" ]; then
+    echo "ERROR:  Something horrible has happened and there isn't a web endpoint"
     exit 1
 fi
 
+echo $WEB_DOMAIN
 
-echo "Sending HTTP POST Request to Storage resourcename............."
-SA_AVAILABLE=$(curl -s \
-    -H "Content-Type: application/json; charset=UTF-8"\
-    -H "Authorization: Bearer $TOKEN"\
-    -XPOST $resourceManagerEndpoint/subscriptions/$subscriptionId/providers/Microsoft.Storage/checkNameAvailability?api-version=2018-11-01 \
-    -d'{
-        "Name": '\""$STOR_NAME"\"',
-        "Type": "Microsoft.Storage/storageAccounts"
-    }' | jq -r ".nameAvailable")
+echo "Creating Premium Verizon CDN"
+az cdn profile create --resource-group $RG_NAME \
+    --name ${STOR_NAME}cdn \
+    --sku Premium_Verizon || exit 1
 
-if [ "$SA_AVAILABLE" == "false" ]; then
-    echo "Storage Account Already Exists. Select another name"
-    exit 1
-fi
-
-if az-rg-exists $RG_NAME; then
-    echo "Error: Resource Group Exists"
-    exit 1
-fi
-
-if az-sa-exists $STOR_NAME; then
-    echo "Error: Storage Acct Exists"
-    exit 1
-fi
-
-if az-fa-exists $FUNC_NAME; then
-    echo "Error: FunctionApp already exists"
-fi
-
-
-az group create \
-    --name $RG_NAME \
-    --location $REGION 1> /dev/null || exit 1
-
-az storage account create \
-    --name $STOR_NAME \
-    --location $REGION \
+echo "Creating Endpoint in CDN"
+az cdn endpoint create --name ${STOR_NAME} \
+    --profile-name ${STOR_NAME}cdn \
+    --origin $WEB_DOMAIN \
     --resource-group $RG_NAME \
-    --sku Standard_LRS 1> /dev/null || exit 1
+    --origin-host-header $WEB_DOMAIN || exit 1
 
-echo "Storage Acct $STOR_NAME created successfully"
+echo "Creating custom domain for endpoint"
+az cdn custom-domain create --endpoint-name ${STOR_NAME} \
+    --hostname www.$DOMAIN_NAME \
+    --name www \
+    --profile-name ${STOR_NAME}cdn \
+    --resource-group $RG_NAME
 
-az functionapp create \
-    --consumption-plan-location $REGION \
-    --name $FUNC_NAME \
-    --os-type $PLATFORM \
-    --resource-group $RG_NAME \
-    --runtime $RUNTIME \
-    --storage-account $STOR_NAME 1> /dev/null || exit 1
-
-echo "Function App $FUNC_NAME created successfully"
-
-# Creates insights component for monitoring. Note generated instrumentation key
-# is set in function app.
-az resource create \
-    --resource-group $RG_NAME \
-    --resource-type "Microsoft.Insights/components" \
-    --name $FUNC_NAME-ai \
-    --location $REGION \
-    --properties '{"Application_Type":"web"}' -o json \
-| jq -r ".properties.InstrumentationKey" \
-| xargs -I % az functionapp config appsettings set \
-    --name $FUNC_NAME \
-    --resource-group $RG_NAME \
-    --settings "APPINSIGHTS_INSTRUMENTATIONKEY = %" || exit 1
-
-echo "Application Insights configured"
+echo "The End"
