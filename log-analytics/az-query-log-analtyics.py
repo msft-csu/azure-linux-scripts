@@ -46,7 +46,6 @@ def get_log_analytics(add, token, workspace_id, kql, timespan):
 
     body = {
         f"query": f"{kql}",
-        #f"query": f"VmImages2_CL | limit 50",
         f"timespan": f"{timespan}"
     }
 
