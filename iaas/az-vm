@@ -133,18 +133,18 @@ fi
 
 # Test the imaged passed in
 if ! [ -z "$IMAGE_PASSED" ]; then
-    IMAGE_EXISTS=$(az image show --ids $IMAGE_PASSED -o json) 2>/dev/null
-    if [ -z "$IMAGE_EXISTS" ]; then
-        # HACK ALERT:  More than one can exist but only taking the first one
-        # Look to see if a short name was passed and if it exists. 
-        IMAGE_ID=$(az image list -o json | jq -r --arg ARG $IMAGE_PASSED '.[] | select(.name == $ARG) | .id' | head -n 1)
-        if [ -z "$IMAGE_ID" ]; then
-            echo "Image was not found in available resource groups.  Please select another image."
-            exit 1
-        else
+    # IMAGE_EXISTS=$(az image show --ids $IMAGE_PASSED -o json) 2>/dev/null
+    # if [ -z "$IMAGE_EXISTS" ]; then
+    #     # HACK ALERT:  More than one can exist but only taking the first one
+    #     # Look to see if a short name was passed and if it exists. 
+    #     IMAGE_ID=$(az image list -o json | jq -r --arg ARG $IMAGE_PASSED '.[] | select(.name == $ARG) | .id' | head -n 1)
+    #     if [ -z "$IMAGE_ID" ]; then
+    #         echo "Image was not found in available resource groups.  Please select another image."
+    #         exit 1
+    #     else
             IMAGE_PASSED=$IMAGE_ID
-        fi
-    fi
+    #      fi
+    # fi
 fi
 
 if [ $WINDOWS ]; then
