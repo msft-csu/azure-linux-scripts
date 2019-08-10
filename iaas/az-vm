@@ -1,12 +1,19 @@
-#!/bin/bash 
+#!/bin/bash
 NET=myVnet
 SUB=mySubNet
 IP=myPublicIP
 NSG=myNetworkSecurityGrp
 NIC=myNic
-SIZE=Standard_B2ms
+SIZE=Basic_A2
 IMAGE=UbuntuLTS
-USERNAME=azuser
+USERNAME=`whoami`
+
+if [ $USERNAME = "root" ]; then
+    echo "ERROR:  Cannot run as root. Use the -u option to pass in the username"
+    echo "Alternatively, you can run this script as the user you want to create"
+    echo "an account for"
+    exit 1
+fi
 
 usage() { 
     echo "`basename $0`"
@@ -128,11 +135,17 @@ fi
 
 # Check if Region is passed in, otherwise eastus will be used
 if [ -z "$REGION" ]; then
-    REGION='eastus'
+    # check if in gov or commercial
+    CLOUD=`az account list-locations -o json | jq -r '.[0].name'`
+    if [ ${CLOUD:0:5} = "usgov" ]; then
+        REGION='usgovvirginia'
+    else
+        REGION='eastus'
+    fi
 fi
 
 # Test the imaged passed in
-if ! [ -z "$IMAGE_PASSED" ]; then
+if [ -z "$IMAGE_PASSED" ]; then
     # IMAGE_EXISTS=$(az image show --ids $IMAGE_PASSED -o json) 2>/dev/null
     # if [ -z "$IMAGE_EXISTS" ]; then
     #     # HACK ALERT:  More than one can exist but only taking the first one
@@ -142,7 +155,7 @@ if ! [ -z "$IMAGE_PASSED" ]; then
     #         echo "Image was not found in available resource groups.  Please select another image."
     #         exit 1
     #     else
-            IMAGE_PASSED=$IMAGE_ID
+            IMAGE_PASSED=$IMAGE
     #      fi
     # fi
 fi
@@ -169,7 +182,7 @@ else
     PASSWORD_STR="--ssh-key-value ~/.ssh/id_rsa.pub"
 fi
 
-echo "Using Image=$IMAGE_ID"
+echo "Using Image=$IMAGE"
 # To debug which image is going to be created
 #echo "Selected image=$IMAGE"
 #exit 1
