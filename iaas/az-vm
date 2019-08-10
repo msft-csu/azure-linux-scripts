@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 NET=myVnet
 SUB=mySubNet
 IP=myPublicIP
@@ -102,37 +102,45 @@ else
     echo "Checking Existing Stuff"
     EXISTING_RG=`az group show -g $RG -o json | jq -r '.name'`
     if ! [ -z "$EXISTING_RG" ]; then
-        EXISTS=true
+        EXISTS=1
         # Only get the first one from the resource group.  Too bad if it's wrong.
         EXISTING_VNET=`az network vnet list -g $RG -o json | jq -r '.[0].name'`
         if [ $EXISTING_VNET == null ]; then
-            echo "No VNET found in ResourceGroup"
-            exit 1
+            VNET_EXISTS=0 
         fi
         EXISTING_SUBNET=`az network vnet subnet list -g $RG --vnet-name $EXISTING_VNET -o json | jq -r '.[0].name'`
         if [ $EXISTING_SUBNET == null ]; then
-            echo "VNet must have a Subnet to continue"
-            exit 1
+            SUBNET_EXISTS=0 
         fi
         EXISTING_NSG=`az network nsg list -g $RG -o json | jq -r '.[0].name'`
         if [ $EXISTING_VNET == null ] || [ $EXISTING_NSG == null ]; then
-            echo "Must have a Security Group with 22 and 3389 open to continue"
-            exit 1
+            NSG_EXISTS=0 
         fi
-        OPEN_PORTS=$(az network nsg list -g $RG -o json)
-        SSH_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "22")')
-        RDP_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "3389")')
-        if [ -z "$SSH_PORT" ] || [ -z "$RDP_PORT" ]; then
-            echo "This script requires port 22 and 3389"
-            exit 1
+        if [ $NSG_EXISTS ]; then
+            OPEN_PORTS=$(az network nsg list -g $RG -o json)
+            SSH_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "22")')
+            RDP_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "3389")')
+            if [ -z "$SSH_PORT" ] || [ -z "$RDP_PORT" ]; then
+                echo "This script requires port 22 and 3389"
+                exit 1
+            fi
         fi
-
-        VNET=$EXISTING_VNET
-        SUB=$EXISTING_SUBNET
-        NSG=$EXISTING_NSG
+        if [ $VNET_EXISTS ]; then
+            VNET=$EXISTING_VNET
+        fi
+        if [ $SUBNET_EXISTS ]; then
+            SUB=$EXISTING_SUBNET
+        fi
+        if [ $NSG_EXISTS ]; then
+            NSG=$EXISTING_NSG
+        fi
     fi
 fi
+echo "VNET=$VNET"
+echo "SUBNET=$SUB"
+echo "NSG=$NSG"
 
+exit 0
 # Check if Region is passed in, otherwise eastus will be used
 if [ -z "$REGION" ]; then
     # check if in gov or commercial
