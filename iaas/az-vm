@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 NET=myVnet
 SUB=mySubNet
 IP=myPublicIP
@@ -7,6 +7,9 @@ NIC=myNic
 SIZE=Basic_A2
 IMAGE=UbuntuLTS
 USERNAME=`whoami`
+VNET_EXISTS=0
+SUBNET_EXISTS=0
+NSG_EXISTS=0
 
 if [ $USERNAME = "root" ]; then
     echo "ERROR:  Cannot run as root. Use the -u option to pass in the username"
@@ -102,21 +105,14 @@ else
     echo "Checking Existing Stuff"
     EXISTING_RG=`az group show -g $RG -o json | jq -r '.name'`
     if ! [ -z "$EXISTING_RG" ]; then
-        EXISTS=1
+        EXISTS=true
         # Only get the first one from the resource group.  Too bad if it's wrong.
         EXISTING_VNET=`az network vnet list -g $RG -o json | jq -r '.[0].name'`
-        if [ $EXISTING_VNET == null ]; then
-            VNET_EXISTS=0 
-        fi
-        EXISTING_SUBNET=`az network vnet subnet list -g $RG --vnet-name $EXISTING_VNET -o json | jq -r '.[0].name'`
-        if [ $EXISTING_SUBNET == null ]; then
-            SUBNET_EXISTS=0 
+        if [ "$EXISTING_VNET" != "null" ]; then
+            EXISTING_SUBNET=`az network vnet subnet list -g $RG --vnet-name $EXISTING_VNET -o json | jq -r '.[0].name'`
         fi
         EXISTING_NSG=`az network nsg list -g $RG -o json | jq -r '.[0].name'`
-        if [ $EXISTING_VNET == null ] || [ $EXISTING_NSG == null ]; then
-            NSG_EXISTS=0 
-        fi
-        if [ $NSG_EXISTS ]; then
+        if [ "$EXISTING_NSG" != "null" ]; then
             OPEN_PORTS=$(az network nsg list -g $RG -o json)
             SSH_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "22")')
             RDP_PORT=$(echo $OPEN_PORTS | jq -r '.[].securityRules[].destinationPortRange|select(. == "3389")')
@@ -125,22 +121,21 @@ else
                 exit 1
             fi
         fi
-        if [ $VNET_EXISTS ]; then
+        if [ "$VNET_EXISTS" != "null" ]; then
             VNET=$EXISTING_VNET
         fi
-        if [ $SUBNET_EXISTS ]; then
+        if [ -z $SUBNET_EXISTS ]; then
             SUB=$EXISTING_SUBNET
         fi
-        if [ $NSG_EXISTS ]; then
+        if [ "$NSG_EXISTS" != "null" ]; then
             NSG=$EXISTING_NSG
         fi
     fi
 fi
-echo "VNET=$VNET"
+echo "VNET=$NET"
 echo "SUBNET=$SUB"
 echo "NSG=$NSG"
 
-exit 0
 # Check if Region is passed in, otherwise eastus will be used
 if [ -z "$REGION" ]; then
     # check if in gov or commercial
@@ -153,19 +148,20 @@ if [ -z "$REGION" ]; then
 fi
 
 # Test the imaged passed in
-if [ -z "$IMAGE_PASSED" ]; then
+if ! [ -z "$IMAGE_PASSED" ]; then
     # IMAGE_EXISTS=$(az image show --ids $IMAGE_PASSED -o json) 2>/dev/null
-    # if [ -z "$IMAGE_EXISTS" ]; then
     #     # HACK ALERT:  More than one can exist but only taking the first one
     #     # Look to see if a short name was passed and if it exists. 
-    #     IMAGE_ID=$(az image list -o json | jq -r --arg ARG $IMAGE_PASSED '.[] | select(.name == $ARG) | .id' | head -n 1)
-    #     if [ -z "$IMAGE_ID" ]; then
-    #         echo "Image was not found in available resource groups.  Please select another image."
-    #         exit 1
-    #     else
-            IMAGE_PASSED=$IMAGE
-    #      fi
-    # fi
+     IMAGE_ID=$(az image list -o json | jq -r --arg ARG $IMAGE_PASSED '.[] | select(.name == $ARG) | .id' | head -n 1)
+     if [ -z "$IMAGE_ID" ]; then
+         # So there is no custom image of that name
+         if ! [[ $IMAGE_PASSED =~ ":" ]]; then
+            echo "Doesn't look like a valid image.  Please select another image."
+            exit 1
+         fi
+     else
+         IMAGE_PASSED=$IMAGE_ID
+     fi
 fi
 
 if [ $WINDOWS ]; then
@@ -204,19 +200,18 @@ fi
 GROUP_ID=$(az group show -g $RG --query "id" -o tsv)
 
 # Create a virtual network.
-if ! [ $EXISTS ]; then
+echo "VNET_EXISTS=$VNET_EXISTS"
+if ((! $VNET_EXISTS)); then
     echo "Creating Vnet $NET..."
     az network vnet create --resource-group $RG --name $NET --subnet-name $SUB 1> /dev/null || exit 1
 fi
 
 # Create a network security group.
-if ! [ $EXISTS ]; then
+echo "NSG_EXISTS=$NSG_EXISTS"
+if ((! $NSG_EXISTS)); then
     echo "Creating Security Group $NSG..."
     az network nsg create --resource-group $RG --name $NSG 1> /dev/null || exit 1
     
-    # This a total hack to generate a random priority.  Could have random failures using this random priority 
-    #PRIORITY=`az network nsg rule list -g $RG --nsg-name myNetworkSecurityGrp -o json | jq -r '.[].priority' | sort -nr | head -n 1`
-
     # Create a Network security rule for access
     # Both Windows and Linux rules are created by default
     echo "Creating a security rule for SSH and RDP..."

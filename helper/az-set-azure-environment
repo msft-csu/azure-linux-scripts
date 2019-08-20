@@ -1,0 +1,97 @@
+#!/bin/zsh -x
+
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for
+# license information.
+
+AZURE_GOV_CLOUD="AzureUSGovernment"
+AZURE_PUB_CLOUD="AzureCloud"
+
+# Check to ensure something was passed in
+if ! [ "$#" -eq 1 ]; then
+    echo "Must pass in Azure Autentication file for parsing"
+    return 1
+fi
+
+# Does the passed in file exist
+if ! [ -f $1 ]; then
+    echo "File not found!" >&2
+    return 1
+fi
+
+# Determine if this is really a JSON file
+jq -e . >/dev/null 2>&1 <<< cat $1; rc=$?
+if [[ $rc != 0 ]]; then
+    echo "Must be an Azure Auth file in JSON format"
+    return 1
+fi
+JSON=$1
+
+# Check and see what cloud we are in
+currentCloud=$(az cloud show -o json | jq -er 'select(.name != null) | .name')
+
+if [ -z $currentCloud ]; then
+    echo "Must be signed into Azure.  Please login"
+    return 1
+fi
+
+if [ "$currentCloud" = "$AZURE_GOV_CLOUD" ]; then
+    cloud="USGovernment"
+    location="usgovvirginia"
+elif [ "$currentCloud" = "$AZURE_PUB_CLOUD" ]; then
+    cloud="Public"
+    location="East US"
+else
+    echo "Current cloud not supported via this script"
+    return 1
+fi
+
+# Parse the file looking for some stuff
+clientId=$(cat $JSON | jq -e -r 'select(.clientId != null) | .clientId')
+subscriptionId=$(cat $JSON | jq -e -r 'select(.subscriptionId != null) | .subscriptionId')
+tenantId=$(cat $JSON | jq -e -r 'select(.tenantId != null) | .tenantId')
+secretKey=$(cat $JSON | jq -e -r 'select(.clientSecret != null) | .clientSecret')
+endpoint=$(cat $JSON | jq -e -r 'select(.activeDirectoryEndpointUrl != null) | .activeDirectoryEndpointUrl')
+
+# Check to see if the auth file is for Gov
+if [[ $endpoint =~ "\.us$" ]]; then
+    # Exit if in the wrong cloud
+    if [ "$currentCloud" != $AZURE_GOV_CLOUD ]; then
+        echo "You are logged into the wrong cloud to use this authorization file"
+        return 1
+    fi
+elif [[ $endpoint =~ "\.com$" ]]; then
+    # Exit if in the wrong cloud
+    if [ "$currentCloud" != $AZURE_PUB_CLOUD ]; then
+        echo "You are logged into the wrong cloud to use this authorization file"
+        return 1
+    fi
+else
+    echo "Unsupported cloud in auth file. Exiting."
+    return 1
+fi
+
+
+if [ -z $clientId ]  || [ -z $subscriptionId ] || [ -z $tenantId ] || [ -z $secretKey ] ; then
+    echo "File does not contain one or more of the following:"
+    echo "clientId, subscriptionId, tenantId and/or clientSecret"
+    return 1
+fi
+
+#echo "clientId=$clientId"
+#echo "subscriptionId=$subscriptionId"
+#echo "tenantId=$tenantId"
+#echo "secretKey=$secretKey"
+#echo "endpoint=$endpoint"
+#echo "cloud=$cloud"
+#echo "location=$location"
+
+export AZURE_CLIENTID=$clientId
+export AZURE_SECRET=$secretKey
+export AZURE_SUBSCRIPTIONID=$subscriptionId
+export AZURE_TENANTID=$tenantId
+export AZURE_CLOUD=$cloud
+export AZURE_LOCATION=$location
+
+
+
