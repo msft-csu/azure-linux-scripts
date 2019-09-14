@@ -1,0 +1,352 @@
+#!/bin/bash 
+SIZE=Standard_DS2_v2
+RND=$(echo $RANDOM | grep -o ..$)
+NAME=myK8sCluster-$RND
+REGION=eastus
+NODE_COUNT=2
+VERSION=1.14.6
+
+
+# Recurse until we have it
+waitForPod() {
+    QUERY=""
+    for label in "$@"; do
+        echo $label
+        QUERY+="-l $label "
+    done
+    echo $QUERY
+    SECONDS=0
+    queryPod 
+    unset SECONDS
+}
+
+queryPod() {
+    CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
+    POD_RESULTS=`eval $CMD`
+    READY=$( echo $POD_RESULTS | awk '{print $3}' | cut -d "/" -f 1 )
+    RUNNING=$( echo $POD_RESULTS | awk '{print $4}' ) 
+    if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
+        if [ $SECONDS -gt 500 ]; then
+            echo "ERROR:  Timed out waiting for pod to start"
+            exit 1
+        fi
+        sleep 10 
+        queryPod
+    fi
+}
+
+installCertManager() {
+    # Install CRD for cert-manager
+    kubectl apply -f https://raw.githubusercontent.com/jetstack/cert-manager/release-0.10/deploy/manifests/00-crds.yaml
+
+    # Create namespace
+    kubectl create namespace cert-manager
+
+    # Label the cert-manager namespace to disable resource validation
+    kubectl label namespace cert-manager certmanager.k8s.io/disable-validation=true
+
+    # Add the Jetstack Helm repository
+    helm repo add jetstack https://charts.jetstack.io
+
+    # Update your local Helm chart repository cache
+    helm repo update
+
+    # Install the cert-manager Helm chart
+    helm install \
+      --name cert-manager \
+      --namespace cert-manager \
+      --version v0.10.0 \
+      jetstack/cert-manager
+
+    waitForPod app=webhook 
+    waitForPod app=cert-manager
+    waitForPod app=cainjector
+
+
+    CLUSTERISSUER_FILE=$(mktemp)
+    trap "rm -rf $CLUSTERISSUER_FILE" EXIT
+
+    cat << EOF > $CLUSTERISSUER_FILE
+apiVersion: certmanager.k8s.io/v1alpha1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: emcconne@hotmail.com
+    privateKeySecretRef:
+      name: letsencrypt
+    http01: {}
+EOF
+
+    kubectl apply -f $CLUSTERISSUER_FILE
+    sleep 10
+}
+
+createAKSCluster() {
+    # Enable_Autoscaler has been disabled for now.  That can never be true
+    if ! [ -z $ENABLE_AUTOSCALER ]; then
+        SCALE='--enable-cluster-autoscaler --min-count 1 --max-count 5'
+    else
+        SCALE='--node-count $NODE_COUNT'
+    fi
+
+    # Create AKS Cluster
+    
+    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --enable-addons monitoring --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+    eval $cmd || exit 1
+
+    K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
+
+    echo "Kubernetes RG=$K8S_RG"
+
+    echo "Wait for $K8S_RG to become a real thing."
+    until az group show -g $K8S_RG; do
+        echo "nap for 30s"
+        sleep 30
+    done
+    echo "Okay $K8S_RG is real now.  Let's move on."
+
+    # Print out Cluster Info
+    az resource show \
+         -n $NAME -g $RG -o json \
+         --resource-type Microsoft.ContainerService/managedClusters || exit 1
+}
+
+createResourceGroup() {
+    # Create a resource group if one doesn't exist
+    az group show -n $RG
+    if [ $? -ne 0 ]; then
+        echo "Creating Resource Group $RG..."
+        az group create --name $RG --location $REGION 1> /dev/null || exit 1
+    fi
+    GROUP_ID=$(az group show -g $RG --query "id" -o tsv)
+}
+
+# Get PublicIP of Load Balancer
+# Recurse until we have it
+getPublicIPofLoadBalancer() {
+    PUBLIC_IP=$(kubectl get services --namespace=ingress -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}')
+    if ! [[ $PUBLIC_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if [ $SECONDS -gt 500 ]; then
+            echo "ERROR:  Timed out getting IP of Load Balancer"
+            exit 1
+        fi
+        sleep 20 
+        getPublicIPofLoadBalancer
+    fi
+    sleep 20
+    echo $PUBLIC_IP
+}
+
+setDNSNameForIngress() {
+    SECONDS=0
+    getPublicIPofLoadBalancer
+    PUBLIC_IP_ID=$( az network public-ip list --query "[?ipAddress!=null]|[?contains(ipAddress, '$PUBLIC_IP')].[id]" -o tsv )
+    if [ -z $PUBLIC_IP_ID ]; then
+        echo "ERROR:  Cound not get Azure ID of public ip address"
+        az network public-ip list -o json 
+        exit 1
+    fi
+    unset SECONDS
+    # Update public ip address with DNS name
+    az network public-ip update --ids $PUBLIC_IP_ID --dns-name $DNS || exit 1
+}
+
+# Check beforehand to see if cluster exists
+clusterExists() {
+    az resource show \
+        -n $NAME -g $RG \
+        -o json \
+        --resource-type Microsoft.ContainerService/managedClusters 2> /dev/null
+
+    if [ $? -eq 0 ]; then
+        echo "ERROR: Cluster by that name already exists"
+        exit 1
+    fi
+}
+
+kubectlContextExists() {
+    IFS=$'\n'
+    for context in $(kubectl config get-contexts --no-headers);
+    do
+        current=$(echo $context | awk '{print $2}')
+        if [ "$current" == "$NAME" ]; then
+            echo "ERROR: kubectl context by same name already exists.  Delete context or change cluster name"
+            exit 1
+        fi
+    done
+}
+
+installIngress() {
+    kubectl create namespace ingress
+    helm install stable/nginx-ingress \
+        --namespace ingress \
+        --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
+        --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
+    kubectl get service -l app=nginx-ingress --namespace ingress
+    waitForPod app=nginx-ingress component=controller
+}
+
+initializeTiller() {
+    #Create a temporay file for YAML and get rid of it after shell exists
+    YAML_FILE=$(mktemp)
+    trap "rm -rf $YAML_FILE" EXIT
+
+    cat << EOF > $YAML_FILE
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tiller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: tiller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tiller
+    namespace: kube-system
+EOF
+    kubectl apply -f $YAML_FILE || exit 1
+    helm init \
+        --history-max 200 \
+        --service-account tiller \
+        --node-selectors "beta.kubernetes.io/os=linux" || exit 1
+    waitForPod app=helm name=tiller
+}
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided."
+    echo "     [-l <region>] Optional:  Region to use.  Default is eastus"
+    echo "     [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default"
+    echo "     [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided"
+    echo "     [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided."
+    echo "     [-c <count>] Optional:  Number of nodes in cluster.  Default is 2."
+    echo "     [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided"
+    echo "     [-f <yaml file>] Optional: Yaml file to apply after cluster creation. You can use ${K8S_FQDN}"
+    echo "                                in your Yaml file and it will be replaced when the script is applied"
+    #echo "     [-a Optional: Turns on autoscaling with min-count=1 and max-count=5"
+    echo "     NOTE:  This program requires az, helm and kubectl to execute"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts v:l:s:n:g:d:ac:f: option
+do
+    case "${option}"
+    in
+        l) REGION=${OPTARG};;
+        s) SIZE=${OPTARG};;
+        n) NAME=${OPTARG};;
+        g) RG=${OPTARG};;
+        c) COUNT=${OPTARG};;
+        d) DNS=${OPTARG};;
+        v) VERSION=${OPTARG};;
+        f) YAML_SCRIPT=${OPTARG};;
+    #    a) ENABLE_AUTOSCALER=true;;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+command -v az
+if [ $? -ne 0 ]; then
+    echo "ERROR: Requires Azure CLI (az).  Aborting..."
+    exit 1
+fi
+
+command -v helm
+if [ $? -ne 0 ]; then
+    echo "ERROR: Requires Helm (helm). Aborting..."
+    exit 1
+fi
+
+command -v kubectl
+if [ $? -ne 0 ]; then
+    echo "ERROR: Requires Kubectl (kubectl). Aborting..."
+    exit 1
+fi
+
+# Check if Resource Group has been passed in, if not we will create one
+if [ -z "$RG" ]; then
+    RG=K8s-$RANDOM
+fi
+
+# Test that any custom data that is passed in exists
+if ! [ -z "$YAML_SCRIPT" ]; then
+    if ! [ -f "$YAML_SCRIPT" ]; then
+        echo "Yaml file does not exist"
+        exit 1
+    fi
+fi
+
+if ! [ -z "$COUNT" ]; then
+    NODE_COUNT=$COUNT
+    if [ "$NODE_COUNT" -lt 1 ] || [ "$NODE_COUNT" -gt 5 ]; then
+        echo "ERROR:  Count must be between 1 and 5"
+        exit 1
+    fi
+fi
+
+# Check if DNS name is passed in
+if [ -z "$DNS" ]; then
+    DNS=$(echo $NAME | sed -e 's/-//g' | awk '{print tolower($0)}')
+    K8S_FQDN="$DNS.eastus.cloudapp.azure.com"
+fi
+
+# Check if Region is passed in, otherwise eastus will be used
+if [ -z "$REGION" ]; then
+    REGION='eastus'
+fi
+
+# Check if Cluster and Resource Group already exists
+clusterExists
+
+# Check if kubectl context already exists
+kubectlContextExists
+
+# Check if resource group exists if not create it
+createResourceGroup
+
+# Create AKS Cluster
+createAKSCluster
+
+# Get kubectl context
+az aks get-credentials -n $NAME -g $RG
+
+# Install Helm Tiller
+initializeTiller
+
+# Install Ingress Controll
+installIngress
+
+# Setup DNS name for Load Balancer
+setDNSNameForIngress
+
+# Setup cert-manager
+installCertManager
+
+if ! [ -z "$YAML_SCRIPT" ]; then
+    # Replace ${K8S_FQDN} in Yaml file and apply it 
+    cat $YAML_SCRIPT | sed -e 's/\${K8S_FQDN}/'$K8S_FQDN'/g' | kubectl apply -f -  || exit 1
+fi
+
+
