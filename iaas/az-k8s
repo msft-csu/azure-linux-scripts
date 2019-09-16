@@ -93,7 +93,7 @@ createAKSCluster() {
     fi
 
     # Create AKS Cluster
-    
+    echo "Creating AKS Cluster.  This will take some time." 
     cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --enable-addons monitoring --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
     eval $cmd || exit 1
 
@@ -102,8 +102,8 @@ createAKSCluster() {
     echo "Kubernetes RG=$K8S_RG"
 
     echo "Wait for $K8S_RG to become a real thing."
-    until az group show -g $K8S_RG; do
-        echo "nap for 30s"
+    until az group show -g $K8S_RG 2>/dev/null; do
+        echo "nap for 30s while waiting."
         sleep 30
     done
     echo "Okay $K8S_RG is real now.  Let's move on."
@@ -116,7 +116,7 @@ createAKSCluster() {
 
 createResourceGroup() {
     # Create a resource group if one doesn't exist
-    az group show -n $RG
+    az group show -n $RG 2> /dev/null
     if [ $? -ne 0 ]; then
         echo "Creating Resource Group $RG..."
         az group create --name $RG --location $REGION 1> /dev/null || exit 1
@@ -267,19 +267,19 @@ do
 done
 shift "$(($OPTIND -1))"
 
-command -v az
+command -v az 2> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Azure CLI (az).  Aborting..."
     exit 1
 fi
 
-command -v helm
+command -v helm 2> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Helm (helm). Aborting..."
     exit 1
 fi
 
-command -v kubectl
+command -v kubectl 2> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Kubectl (kubectl). Aborting..."
     exit 1
@@ -349,4 +349,5 @@ if ! [ -z "$YAML_SCRIPT" ]; then
     cat $YAML_SCRIPT | sed -e 's/\${K8S_FQDN}/'$K8S_FQDN'/g' | kubectl apply -f -  || exit 1
 fi
 
+echo "$K8S_FQDN" created
 
