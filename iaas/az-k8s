@@ -127,7 +127,7 @@ createResourceGroup() {
 # Get PublicIP of Load Balancer
 # Recurse until we have it
 getPublicIPofLoadBalancer() {
-    PUBLIC_IP=$(kubectl get services --namespace=ingress -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}')
+    PUBLIC_IP=$(kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}')
     if ! [[ $PUBLIC_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ $SECONDS -gt 500 ]; then
             echo "ERROR:  Timed out getting IP of Load Balancer"
@@ -180,12 +180,12 @@ kubectlContextExists() {
 }
 
 installIngress() {
-    kubectl create namespace ingress
+    kubectl create namespace ingress-nginx
     helm install stable/nginx-ingress \
-        --namespace ingress \
+        --namespace ingress-nginx \
         --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
         --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
-    kubectl get service -l app=nginx-ingress --namespace ingress
+    kubectl get service -l app=nginx-ingress --namespace ingress-nginx
     waitForPod app=nginx-ingress component=controller
 }
 
