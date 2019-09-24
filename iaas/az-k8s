@@ -1,7 +1,6 @@
-#!/bin/bash 
+#!/bin/bash -x
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
-NAME=myK8sCluster-$RND
 REGION=eastus
 NODE_COUNT=2
 VERSION=1.14.6
@@ -16,23 +15,59 @@ waitForPod() {
     done
     echo $QUERY
     SECONDS=0
-    queryPod 
+#    queryPod
+    queryPodList
     unset SECONDS
 }
 
-queryPod() {
+# queryPod() {
+#     CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
+#     POD_RESULTS=`eval $CMD`
+#     READY=$( echo $POD_RESULTS | awk '{print $3}' | cut -d "/" -f 1 )
+#     RUNNING=$( echo $POD_RESULTS | awk '{print $4}' ) 
+#     if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
+#         if [ $SECONDS -gt 500 ]; then
+#             echo "ERROR:  Timed out waiting for pod to start"
+#             exit 1
+#         fi
+#         sleep 10 
+#         queryPod
+#     fi
+# }
+
+queryPodList() {
     CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
     POD_RESULTS=`eval $CMD`
-    READY=$( echo $POD_RESULTS | awk '{print $3}' | cut -d "/" -f 1 )
-    RUNNING=$( echo $POD_RESULTS | awk '{print $4}' ) 
-    if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
-        if [ $SECONDS -gt 500 ]; then
-            echo "ERROR:  Timed out waiting for pod to start"
-            exit 1
+    IFS=$'\n'
+    for result in $POD_RESULTS; do
+        echo $result
+        READY=$( echo $result | awk '{print $3}' | cut -d "/" -f 1 )
+        RUNNING=$( echo $result | awk '{print $4}' ) 
+        if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
+            sleep 10
+            queryPodList
+            if [ $SECONDS -gt 500 ]; then
+                echo "ERROR:  Timed out waiting for pod to start"
+                exit 1
+            fi
         fi
-        sleep 10 
-        queryPod
-    fi
+    done
+}
+
+installPrometheus() {
+    # Bug in Prometheus helm package as of 9/23/2019 requires a workaround install
+    # See https://github.com/helm/helm/issues/6130
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/alertmanager.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheus.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheusrule.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/servicemonitor.crd.yaml
+    # Call with set so that custom resources aren't created... we just created them above
+    helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
+    waitForPod release=prometheus-operator
+}
+
+installDashboardCredential() {
+    kubectl create clusterrolebinding kubernetes-dashboard --clusterrole=cluster-admin --serviceaccount=kube-system:kubernetes-dashboard
 }
 
 installCertManager() {
@@ -58,15 +93,12 @@ installCertManager() {
       --version v0.10.0 \
       jetstack/cert-manager
 
-    waitForPod app=webhook 
-    waitForPod app=cert-manager
-    waitForPod app=cainjector
+    #waitForPod app=webhook 
+    #waitForPod app=cert-manager
+    #waitForPod app=cainjector
+    waitForPod app.kubernetes.io/instance=cert-manager
 
-
-    CLUSTERISSUER_FILE=$(mktemp)
-    trap "rm -rf $CLUSTERISSUER_FILE" EXIT
-
-    cat << EOF > $CLUSTERISSUER_FILE
+    cat << EOF | kubectl apply -f -
 apiVersion: certmanager.k8s.io/v1alpha1
 kind: ClusterIssuer
 metadata:
@@ -74,13 +106,11 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: emcconne@hotmail.com
+    email: admin@azurepatterns.com
     privateKeySecretRef:
       name: letsencrypt
     http01: {}
 EOF
-
-    kubectl apply -f $CLUSTERISSUER_FILE
     sleep 10
 }
 
@@ -94,7 +124,7 @@ createAKSCluster() {
 
     # Create AKS Cluster
     echo "Creating AKS Cluster.  This will take some time." 
-    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --enable-addons monitoring --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
     eval $cmd || exit 1
 
     K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
@@ -107,6 +137,11 @@ createAKSCluster() {
         sleep 30
     done
     echo "Okay $K8S_RG is real now.  Let's move on."
+   
+    #Monitoring only supported in Commercial right now 
+    if ! [[ "$CLOUD" =~ "Government" ]]; then
+        az aks enable-addons -a  monitoring -n $NAME -g $RG
+    fi
 
     # Print out Cluster Info
     az resource show \
@@ -136,8 +171,6 @@ getPublicIPofLoadBalancer() {
         sleep 20 
         getPublicIPofLoadBalancer
     fi
-    sleep 20
-    echo $PUBLIC_IP
 }
 
 setDNSNameForIngress() {
@@ -152,6 +185,9 @@ setDNSNameForIngress() {
     unset SECONDS
     # Update public ip address with DNS name
     az network public-ip update --ids $PUBLIC_IP_ID --dns-name $DNS || exit 1
+
+    # Now that DNS is set let's get the FQDN
+    K8S_FQDN=$( az network public-ip list --query "[?ipAddress!=null]|[?contains(ipAddress, '$PUBLIC_IP')].[dnsSettings.fqdn]" -o tsv )
 }
 
 # Check beforehand to see if cluster exists
@@ -162,8 +198,7 @@ clusterExists() {
         --resource-type Microsoft.ContainerService/managedClusters 2> /dev/null
 
     if [ $? -eq 0 ]; then
-        echo "ERROR: Cluster by that name already exists"
-        exit 1
+        CLUSTER_EXISTS=1
     fi
 }
 
@@ -173,28 +208,25 @@ kubectlContextExists() {
     do
         current=$(echo $context | awk '{print $2}')
         if [ "$current" == "$NAME" ]; then
-            echo "ERROR: kubectl context by same name already exists.  Delete context or change cluster name"
-            exit 1
+            KUBECTL_EXISTS=1
         fi
     done
 }
 
 installIngress() {
     kubectl create namespace ingress-nginx
-    helm install stable/nginx-ingress \
-        --namespace ingress-nginx \
-        --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
-        --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
-    kubectl get service -l app=nginx-ingress --namespace ingress-nginx
-    waitForPod app=nginx-ingress component=controller
+    if [ $? -eq 0 ]; then
+        helm install stable/nginx-ingress \
+            --namespace ingress-nginx \
+            --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
+            --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
+        kubectl get service -l app=nginx-ingress --namespace ingress-nginx
+        waitForPod app=nginx-ingress component=controller
+    fi
 }
 
 initializeTiller() {
-    #Create a temporay file for YAML and get rid of it after shell exists
-    YAML_FILE=$(mktemp)
-    trap "rm -rf $YAML_FILE" EXIT
-
-    cat << EOF > $YAML_FILE
+    cat << EOF | kubectl apply -f - 
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -214,7 +246,6 @@ subjects:
     name: tiller
     namespace: kube-system
 EOF
-    kubectl apply -f $YAML_FILE || exit 1
     helm init \
         --history-max 200 \
         --service-account tiller \
@@ -228,6 +259,9 @@ usage() {
     echo "     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided."
     echo "     [-l <region>] Optional:  Region to use.  Default is eastus"
     echo "     [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default"
+    echo "     [-p ] Optional: Add Prometheus to cluster"
+    echo "     [-i ] Optional: Add Ingress Controller and Cert-Manager to cluster"
+    echo "     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances."
     echo "     [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided"
     echo "     [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided."
     echo "     [-c <count>] Optional:  Number of nodes in cluster.  Default is 2."
@@ -248,11 +282,14 @@ for arg in "$@"; do
   esac
 done
 
-while getopts v:l:s:n:g:d:ac:f: option
+while getopts ipbv:l:s:n:g:d:ac:f: option
 do
     case "${option}"
     in
         l) REGION=${OPTARG};;
+        i) INGRESS=true;;
+        p) PROMETHEUS=true;;
+        b) DASHBOARD=true;;
         s) SIZE=${OPTARG};;
         n) NAME=${OPTARG};;
         g) RG=${OPTARG};;
@@ -290,6 +327,10 @@ if [ -z "$RG" ]; then
     RG=K8s-$RANDOM
 fi
 
+if [ -z "$NAME" ]; then
+    NAME=myK8sCluster-$RND
+fi
+
 # Test that any custom data that is passed in exists
 if ! [ -z "$YAML_SCRIPT" ]; then
     if ! [ -f "$YAML_SCRIPT" ]; then
@@ -309,7 +350,6 @@ fi
 # Check if DNS name is passed in
 if [ -z "$DNS" ]; then
     DNS=$(echo $NAME | sed -e 's/-//g' | awk '{print tolower($0)}')
-    K8S_FQDN="$DNS.eastus.cloudapp.azure.com"
 fi
 
 # Check if Region is passed in, otherwise eastus will be used
@@ -317,17 +357,47 @@ if [ -z "$REGION" ]; then
     REGION='eastus'
 fi
 
+CLOUD=$( az account list -o json --query "[0].name" -o tsv )
+
 # Check if Cluster and Resource Group already exists
 clusterExists
+if ! (($CLUSTER_EXISTS)); then
+    read -r -d '' CLUSTER_EXISTS_MESSAGE <<EOF
+    echo "AKS Cluster with name=$NAME in rg=$RG does not exist.  Create it?"
+    [y/N]? 
+EOF
+    read -p "$CLUSTER_EXISTS_MESSAGE" CLUSTER_ANSWER
+    if ! [[ $CLUSTER_ANSWER =~ [yY](es)* ]]; then
+        echo "Okey Dokey will exit and let you think about it"
+        exit 0
+    else
+        CREATE_CLUSTER=1
+    fi
+fi
 
 # Check if kubectl context already exists
 kubectlContextExists
+if (($KUBECTL_EXISTS)); then
+    read -r -d '' KUBECTL_MESSAGE <<EOF
+    echo "Local Kubectl context exists for this cluster.  Continue?"
+    [y/N]? 
+EOF
+    read -p "$KUBECTL_MESSAGE" KUBECTL_ANSWER
+    if ! [[ $KUBECTL_ANSWER =~ [yY](es)* ]]; then
+        echo "Okey Dokey will exit and let you think about it"
+        exit 0
+    fi
+fi
 
 # Check if resource group exists if not create it
-createResourceGroup
+if (($CREATE_CLUSTER)); then
+    createResourceGroup
+fi
 
 # Create AKS Cluster
-createAKSCluster
+if (($CREATE_CLUSTER)); then
+    createAKSCluster
+fi
 
 # Get kubectl context
 az aks get-credentials -n $NAME -g $RG
@@ -336,13 +406,23 @@ az aks get-credentials -n $NAME -g $RG
 initializeTiller
 
 # Install Ingress Controll
-installIngress
-
-# Setup DNS name for Load Balancer
-setDNSNameForIngress
+if ! [ -z $INGRESS ]; then
+    installIngress
+    # Setup DNS name for Load Balancer
+    setDNSNameForIngress
+    echo "Public IP=$PUBLIC_IP"
+    installCertManager
+fi
 
 # Setup cert-manager
-installCertManager
+if ! [ -z $DASHBOARD ]; then
+    installDashboardCredential
+fi
+
+# install Prometheus/Grafana
+if ! [ -z $PROMETHEUS ]; then
+    installPrometheus
+fi
 
 if ! [ -z "$YAML_SCRIPT" ]; then
     # Replace ${K8S_FQDN} in Yaml file and apply it 
