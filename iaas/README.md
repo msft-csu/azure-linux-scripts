@@ -25,20 +25,21 @@ hello-world application included in the yaml directory.
 
 az-k8s -f ./yaml/hello-world.yaml
 
-   Usage:
-     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided.
-     [-l <region>] Optional:  Region to use.  Default is eastus
-     [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default
-     [-i <email address>] Optional: Add Ingress and Cert-Manager to cluster.  Email required for Let's Encrypt
-     [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided
-     [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided.
-     [-c <count>] Optional:  Number of nodes in cluster.  Default is 2.
-     [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided
-     [-f <yaml file>] Optional: Yaml file to apply after cluster creation. You can use
-                                in your Yaml file and it will be replaced when the script is applied
-     [-p ] Optional: Add Prometheus to cluster
-     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances.
-     NOTE:  This program requires az, helm and kubectl to execute
+
+Usage:
+    [-g <group>] Optional: Resource group to use.  Default is supplied if not provided.
+    [-l <region>] Optional:  Region to use.  Default is eastus
+    [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default
+    [-i <email address>] Optional: Add Ingress and Cert-Manager to cluster.  Email required for Let's Encrypt
+    [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided
+    [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided.
+    [-c <count>] Optional:  Number of nodes in cluster.  Default is 2.
+    [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided
+    [-f <yaml file>] Optional: Yaml file to apply after cluster creation. You can use
+                            in your Yaml file and it will be replaced when the script is applied
+    [-p ] Optional: Add Prometheus to cluster
+    [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances.
+    NOTE:  This program requires az, helm and kubectl to execute
 
 
 ### az-vm
