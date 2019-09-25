@@ -1,10 +1,27 @@
-#!/bin/bash -x
+#bin/bash
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
-REGION=eastus
 NODE_COUNT=2
 VERSION=1.14.6
 
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided."
+    echo "     [-l <region>] Optional:  Region to use.  Default is eastus"
+    echo "     [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default"
+    echo "     [-i <email address>] Optional: Add Ingress and Cert-Manager to cluster.  Email required for Let's Encrypt"
+    echo "     [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided"
+    echo "     [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided."
+    echo "     [-c <count>] Optional:  Number of nodes in cluster.  Default is 2."
+    echo "     [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided"
+    echo "     [-f <yaml file>] Optional: Yaml file to apply after cluster creation. You can use ${K8S_FQDN}"
+    echo "                                in your Yaml file and it will be replaced when the script is applied"
+    echo "     [-p ] Optional: Add Prometheus to cluster"
+    echo "     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances."
+    echo "     NOTE:  This program requires az, helm and kubectl to execute"
+    exit 1
+}
 
 # Recurse until we have it
 waitForPod() {
@@ -19,21 +36,6 @@ waitForPod() {
     queryPodList
     unset SECONDS
 }
-
-# queryPod() {
-#     CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
-#     POD_RESULTS=`eval $CMD`
-#     READY=$( echo $POD_RESULTS | awk '{print $3}' | cut -d "/" -f 1 )
-#     RUNNING=$( echo $POD_RESULTS | awk '{print $4}' ) 
-#     if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
-#         if [ $SECONDS -gt 500 ]; then
-#             echo "ERROR:  Timed out waiting for pod to start"
-#             exit 1
-#         fi
-#         sleep 10 
-#         queryPod
-#     fi
-# }
 
 queryPodList() {
     CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
@@ -93,9 +95,6 @@ installCertManager() {
       --version v0.10.0 \
       jetstack/cert-manager
 
-    #waitForPod app=webhook 
-    #waitForPod app=cert-manager
-    #waitForPod app=cainjector
     waitForPod app.kubernetes.io/instance=cert-manager
 
     cat << EOF | kubectl apply -f -
@@ -106,7 +105,7 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: admin@azurepatterns.com
+    email: $INGRESS
     privateKeySecretRef:
       name: letsencrypt
     http01: {}
@@ -253,26 +252,6 @@ EOF
     waitForPod app=helm name=tiller
 }
 
-usage() { 
-    echo "`basename $0`"
-    echo "   Usage: " 
-    echo "     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided."
-    echo "     [-l <region>] Optional:  Region to use.  Default is eastus"
-    echo "     [-s <vm-size-by-type>] Optional: Azure VM size. Standard_DS2_v2 is default"
-    echo "     [-p ] Optional: Add Prometheus to cluster"
-    echo "     [-i ] Optional: Add Ingress Controller and Cert-Manager to cluster"
-    echo "     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances."
-    echo "     [-n <k8s name>] Optional: Name for the Kubernetes cluster.  Defaults are supplied if not provided"
-    echo "     [-d <dns name>] Optional: DNS name for the ingress controller.  Defaults are used if not provided."
-    echo "     [-c <count>] Optional:  Number of nodes in cluster.  Default is 2."
-    echo "     [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided"
-    echo "     [-f <yaml file>] Optional: Yaml file to apply after cluster creation. You can use ${K8S_FQDN}"
-    echo "                                in your Yaml file and it will be replaced when the script is applied"
-    #echo "     [-a Optional: Turns on autoscaling with min-count=1 and max-count=5"
-    echo "     NOTE:  This program requires az, helm and kubectl to execute"
-    exit 1
-}
-
 # Catch any help requests
 for arg in "$@"; do
   case "$arg" in
@@ -282,12 +261,12 @@ for arg in "$@"; do
   esac
 done
 
-while getopts ipbv:l:s:n:g:d:ac:f: option
+while getopts pbav:l:i:s:n:g:d:c:f: option
 do
     case "${option}"
     in
         l) REGION=${OPTARG};;
-        i) INGRESS=true;;
+        i) INGRESS=${OPTARG};;
         p) PROMETHEUS=true;;
         b) DASHBOARD=true;;
         s) SIZE=${OPTARG};;
@@ -297,26 +276,25 @@ do
         d) DNS=${OPTARG};;
         v) VERSION=${OPTARG};;
         f) YAML_SCRIPT=${OPTARG};;
-    #    a) ENABLE_AUTOSCALER=true;;
         *) usage;;
         : ) usage;;
     esac
 done
 shift "$(($OPTIND -1))"
 
-command -v az 2> /dev/null
+command -v az 2&> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Azure CLI (az).  Aborting..."
     exit 1
 fi
 
-command -v helm 2> /dev/null
+command -v helm 2&> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Helm (helm). Aborting..."
     exit 1
 fi
 
-command -v kubectl 2> /dev/null
+command -v kubectl 2&> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Kubectl (kubectl). Aborting..."
     exit 1
@@ -352,19 +330,31 @@ if [ -z "$DNS" ]; then
     DNS=$(echo $NAME | sed -e 's/-//g' | awk '{print tolower($0)}')
 fi
 
-# Check if Region is passed in, otherwise eastus will be used
-if [ -z "$REGION" ]; then
-    REGION='eastus'
+LOGGED_IN=$( az account show 2>&1 )
+if [[ $LOGGED_IN =~ "ERROR" ]]; then
+    echo "ERROR:  Log into azure cli before continuing"
+    exit 1
 fi
 
-CLOUD=$( az account list -o json --query "[0].name" -o tsv )
+CLOUD=$( az account list -o json --query "[0].name" -o tsv 2>&1 )
+echo $CLOUD
+
+# Check if REGION is passed in otherwise set defaults
+if [ -z "$REGION" ]; then
+    if [[ "$CLOUD" =~ "Government" ]]; then
+        REGION=usgovvirginia
+    else 
+        REGION=eastus
+    fi
+fi
+
+echo "Using REGION=$REGION"
 
 # Check if Cluster and Resource Group already exists
 clusterExists
 if ! (($CLUSTER_EXISTS)); then
     read -r -d '' CLUSTER_EXISTS_MESSAGE <<EOF
-    echo "AKS Cluster with name=$NAME in rg=$RG does not exist.  Create it?"
-    [y/N]? 
+AKS Cluster with name=$NAME in rg=$RG does not exist.  Create it? [y/N]
 EOF
     read -p "$CLUSTER_EXISTS_MESSAGE" CLUSTER_ANSWER
     if ! [[ $CLUSTER_ANSWER =~ [yY](es)* ]]; then
@@ -379,8 +369,7 @@ fi
 kubectlContextExists
 if (($KUBECTL_EXISTS)); then
     read -r -d '' KUBECTL_MESSAGE <<EOF
-    echo "Local Kubectl context exists for this cluster.  Continue?"
-    [y/N]? 
+Local kubectl context exists for this cluster.  Continue? [y/N]
 EOF
     read -p "$KUBECTL_MESSAGE" KUBECTL_ANSWER
     if ! [[ $KUBECTL_ANSWER =~ [yY](es)* ]]; then
@@ -425,7 +414,10 @@ if ! [ -z $PROMETHEUS ]; then
 fi
 
 if ! [ -z "$YAML_SCRIPT" ]; then
-    # Replace ${K8S_FQDN} in Yaml file and apply it 
+    # Replace ${K8S_FQDN} in Yaml file and apply it
+    if [ -z $K8S_FQDN ]; then
+        K8S_FQDN=$( az network public-ip list --query "[?ipAddress!=null]|[?contains(ipAddress, '$PUBLIC_IP')].[dnsSettings.fqdn]" -o tsv )
+    fi
     cat $YAML_SCRIPT | sed -e 's/\${K8S_FQDN}/'$K8S_FQDN'/g' | kubectl apply -f -  || exit 1
 fi
 
