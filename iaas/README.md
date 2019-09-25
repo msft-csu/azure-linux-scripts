@@ -25,7 +25,7 @@ hello-world application included in the yaml directory.
 
 az-k8s -f ./yaml/hello-world.yaml
 
-
+~~~
 Usage:
     [-g <group>] Optional: Resource group to use.  Default is supplied if not provided.
     [-l <region>] Optional:  Region to use.  Default is eastus
@@ -40,7 +40,7 @@ Usage:
     [-p ] Optional: Add Prometheus to cluster
     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances.
     NOTE:  This program requires az, helm and kubectl to execute
-
+~~~
 
 ### az-vm
 
