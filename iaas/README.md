@@ -67,6 +67,7 @@ You can also apply cloud-init scripts to supported VMs by using the -d option
 
 ./az-vm -d ./cloud-init.yaml
 
+~~~
    Usage:
      [-w] create a Windows VM.  Ubuntu is the default
      [-c <num>] how many VMs to create
@@ -78,4 +79,4 @@ You can also apply cloud-init scripts to supported VMs by using the -d option
      [-n <vm name>] name for the VM.  Defaults are supplied if not provided
      [-u <username>] username created on the VM. Defaults are supplied if not provided
      [-a <storage acct>] storage account for VM analytics.  No analytics are reported if not provided.
-
+~~~
