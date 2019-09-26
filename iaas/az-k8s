@@ -200,7 +200,7 @@ createResourceGroup() {
 # Get PublicIP of Load Balancer
 # Recurse until we have it
 getPublicIPofLoadBalancer() {
-    PUBLIC_IP=$(kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}')
+    PUBLIC_IP=$(kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' 2&> /dev/null )
     if ! [[ $PUBLIC_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ $SECONDS -gt 500 ]; then
             echo "ERROR:  Timed out getting IP of Load Balancer"
@@ -394,7 +394,7 @@ echo "Using REGION=$REGION"
 clusterExists
 if ! (($CLUSTER_EXISTS)); then
     read -r -d '' CLUSTER_EXISTS_MESSAGE <<EOF
-AKS Cluster with name=$NAME in rg=$RG does not exist.  Create it? [y/N]
+### WARNING ###:  AKS Cluster with name=$NAME in rg=$RG does not exist.  Create it? [y/N]
 EOF
     read -p "$CLUSTER_EXISTS_MESSAGE" CLUSTER_ANSWER
     if ! [[ $CLUSTER_ANSWER =~ [yY](es)* ]]; then
@@ -453,12 +453,13 @@ if ! [ -z $PROMETHEUS ]; then
     installPrometheus
 fi
 
+# apply script if it was passed in
 if ! [ -z "$YAML_SCRIPT" ]; then
-    # Replace ${K8S_FQDN} in Yaml file and apply it
-    if [ -z $K8S_FQDN ]; then
-        K8S_FQDN=$( az network public-ip list --query "[?ipAddress!=null]|[?contains(ipAddress, '$PUBLIC_IP')].[dnsSettings.fqdn]" -o tsv )
-    fi
-    cat $YAML_SCRIPT | sed -e 's/\${K8S_FQDN}/'$K8S_FQDN'/g' | kubectl apply -f -  || exit 1
+    set -e
+    (
+        set -x
+        cat $YAML_SCRIPT | kubectl apply -f -
+    }
 fi
 
 echo "$K8S_FQDN" created
