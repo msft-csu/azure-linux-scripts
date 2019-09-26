@@ -458,7 +458,7 @@ if ! [ -z "$YAML_SCRIPT" ]; then
     (
         set -x
         cat $YAML_SCRIPT | kubectl apply -f -
-    }
+    )
 fi
 
 echo "$K8S_FQDN" created
