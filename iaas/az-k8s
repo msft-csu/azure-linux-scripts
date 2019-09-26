@@ -56,20 +56,43 @@ queryPodList() {
     done
 }
 
+randomCharUpper() {
+    s=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+    p=$(( $RANDOM % 26))
+    echo -n ${s:$p:1}
+}
+
+randomChar() {
+    s=abcdefghijklmnopqrstuvxwyz0123456789
+    p=$(( $RANDOM % 36))
+    echo -n ${s:$p:1}
+}
+
+randomNum() {
+    echo -n $(( $RANDOM % 10 ))
+}
+
 installPrometheus() {
     # Bug in Prometheus helm package as of 9/23/2019 requires a workaround install
     # See https://github.com/helm/helm/issues/6130
-    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/alertmanager.crd.yaml
-    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheus.crd.yaml
-    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheusrule.crd.yaml
-    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/servicemonitor.crd.yaml
-    # Call with set so that custom resources aren't created... we just created them above
-    helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
+    set -e 
+    (
+        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/alertmanager.crd.yaml
+        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheus.crd.yaml
+        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheusrule.crd.yaml
+        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/servicemonitor.crd.yaml
+        # Call with set so that custom resources aren't created... we just created them above
+        helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
+    )
     waitForPod release=prometheus-operator
 }
 
 installDashboardCredential() {
-    kubectl create clusterrolebinding kubernetes-dashboard --clusterrole=cluster-admin --serviceaccount=kube-system:kubernetes-dashboard
+    set -x 
+    (
+        echo "Installing ClusterRoleBinding for Kubernetes Dashboard"
+        kubectl create clusterrolebinding kubernetes-dashboard --clusterrole=cluster-admin --serviceaccount=kube-system:kubernetes-dashboard
+    )
 }
 
 installCertManager() {
@@ -122,38 +145,54 @@ createAKSCluster() {
     fi
 
     # Create AKS Cluster
-    echo "Creating AKS Cluster.  This will take some time." 
-    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
-    eval $cmd || exit 1
+    set -e 
+    (
+        echo "Creating AKS Cluster.  This will take some time." 
+        set -x 
+        (
+            cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+            eval $cmd
+        )
+        K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
 
-    K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
+        echo "Kubernetes RG=$K8S_RG"
 
-    echo "Kubernetes RG=$K8S_RG"
+        echo "Wait for $K8S_RG to become a real thing."
+        until az group show -g $K8S_RG 2>/dev/null; do
+            echo "nap for 30s while waiting."
+            sleep 30
+        done
+        echo "Okay $K8S_RG is real now.  Let's move on."
+    ) 
 
-    echo "Wait for $K8S_RG to become a real thing."
-    until az group show -g $K8S_RG 2>/dev/null; do
-        echo "nap for 30s while waiting."
-        sleep 30
-    done
-    echo "Okay $K8S_RG is real now.  Let's move on."
-   
     #Monitoring only supported in Commercial right now 
     if ! [[ "$CLOUD" =~ "Government" ]]; then
-        az aks enable-addons -a  monitoring -n $NAME -g $RG
+        set -e 
+        (
+            set -x 
+            (
+                echo "Enable AKS Monitoring"
+                az aks enable-addons -a  monitoring -n $NAME -g $RG
+            )
+        )
     fi
 
     # Print out Cluster Info
-    az resource show \
-         -n $NAME -g $RG -o json \
-         --resource-type Microsoft.ContainerService/managedClusters || exit 1
+    # az resource show \
+    #      -n $NAME -g $RG -o json \
+    #      --resource-type Microsoft.ContainerService/managedClusters || exit 1
 }
 
 createResourceGroup() {
     # Create a resource group if one doesn't exist
     az group show -n $RG 2> /dev/null
     if [ $? -ne 0 ]; then
-        echo "Creating Resource Group $RG..."
-        az group create --name $RG --location $REGION 1> /dev/null || exit 1
+        set -e 
+        (
+            set -x
+            echo "Creating Resource Group $RG..."
+            az group create --name $RG --location $REGION 1> /dev/null
+        )
     fi
     GROUP_ID=$(az group show -g $RG --query "id" -o tsv)
 }
@@ -217,6 +256,7 @@ installIngress() {
     if [ $? -eq 0 ]; then
         helm install stable/nginx-ingress \
             --namespace ingress-nginx \
+            --set controller.service.externalTrafficPolicy=Local \
             --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
             --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
         kubectl get service -l app=nginx-ingress --namespace ingress-nginx
