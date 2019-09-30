@@ -1,4 +1,4 @@
-#bin/bash
+#!/bin/bash -x
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
@@ -74,24 +74,19 @@ randomNum() {
 installPrometheus() {
     # Bug in Prometheus helm package as of 9/23/2019 requires a workaround install
     # See https://github.com/helm/helm/issues/6130
-    set -e 
-    (
-        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/alertmanager.crd.yaml
-        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheus.crd.yaml
-        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheusrule.crd.yaml
-        kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/servicemonitor.crd.yaml
-        # Call with set so that custom resources aren't created... we just created them above
-        helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
-    )
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/alertmanager.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheus.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/prometheusrule.crd.yaml
+    kubectl apply -f https://raw.githubusercontent.com/coreos/prometheus-operator/master/example/prometheus-operator-crd/servicemonitor.crd.yaml
+    # Call with set so that custom resources aren't created... we just created them above
+    helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
+    
     waitForPod release=prometheus-operator
 }
 
 installDashboardCredential() {
-    set -x 
-    (
         echo "Installing ClusterRoleBinding for Kubernetes Dashboard"
         kubectl create clusterrolebinding kubernetes-dashboard --clusterrole=cluster-admin --serviceaccount=kube-system:kubernetes-dashboard
-    )
 }
 
 installCertManager() {
@@ -144,36 +139,24 @@ createAKSCluster() {
     fi
 
     # Create AKS Cluster
-    set -e 
-    (
-        echo "Creating AKS Cluster.  This will take some time." 
-        set -x 
-        (
-            cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
-            eval $cmd
-        )
-        K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
+    echo "Creating AKS Cluster.  This will take some time." 
+        cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+        eval $cmd
+    K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
 
-        echo "Kubernetes RG=$K8S_RG"
+    echo "Kubernetes RG=$K8S_RG"
 
-        echo "Wait for $K8S_RG to become a real thing."
-        until az group show -g $K8S_RG 2>/dev/null; do
-            echo "nap for 30s while waiting."
-            sleep 30
-        done
-        echo "Okay $K8S_RG is real now.  Let's move on."
-    ) 
+    echo "Wait for $K8S_RG to become a real thing."
+    until az group show -g $K8S_RG 2>/dev/null; do
+        echo "nap for 30s while waiting."
+        sleep 30
+    done
+    echo "Okay $K8S_RG is real now.  Let's move on."
 
     #Monitoring only supported in Commercial right now 
     if ! [[ "$CLOUD" =~ "Government" ]]; then
-        set -e 
-        (
-            set -x 
-            (
-                echo "Enable AKS Monitoring"
-                az aks enable-addons -a  monitoring -n $NAME -g $RG
-            )
-        )
+        echo "Enable AKS Monitoring"
+        az aks enable-addons -a  monitoring -n $NAME -g $RG
     fi
 
     # Print out Cluster Info
@@ -186,12 +169,8 @@ createResourceGroup() {
     # Create a resource group if one doesn't exist
     az group show -n $RG 2> /dev/null
     if [ $? -ne 0 ]; then
-        set -e 
-        (
-            set -x
-            echo "Creating Resource Group $RG..."
-            az group create --name $RG --location $REGION 1> /dev/null
-        )
+        echo "Creating Resource Group $RG..."
+        az group create --name $RG --location $REGION 1> /dev/null
     fi
     GROUP_ID=$(az group show -g $RG --query "id" -o tsv)
 }
@@ -199,7 +178,7 @@ createResourceGroup() {
 # Get PublicIP of Load Balancer
 # Recurse until we have it
 getPublicIPofLoadBalancer() {
-    PUBLIC_IP=$(kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' 2&> /dev/null )
+    PUBLIC_IP=$( kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' )
     if ! [[ $PUBLIC_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ $SECONDS -gt 500 ]; then
             echo "ERROR:  Timed out getting IP of Load Balancer"
@@ -257,7 +236,11 @@ installIngress() {
             --namespace ingress-nginx \
             --set controller.service.externalTrafficPolicy=Local \
             --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
-            --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux || exit 1
+            --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux
+        if [ $? -ne 0 ]; then
+            echo "Failed to install nginx-ingress helm package"
+            exit 1
+        fi
         kubectl get service -l app=nginx-ingress --namespace ingress-nginx
         waitForPod app=nginx-ingress component=controller
     fi
@@ -454,11 +437,7 @@ fi
 
 # apply script if it was passed in
 if ! [ -z "$YAML_SCRIPT" ]; then
-    set -e
-    (
-        set -x
-        cat $YAML_SCRIPT | kubectl apply -f -
-    )
+    cat $YAML_SCRIPT | kubectl apply -f -
 fi
 
 echo "$K8S_FQDN" created
