@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
