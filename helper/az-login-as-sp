@@ -1,0 +1,112 @@
+#!/bin/bash
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-f <azure auth file>] Azure auth file created with --sdk-auth flag."
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts f: option
+do
+    case "${option}"
+    in
+        f) AUTH_FILE=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+# Did we get a value passed in
+if [ -z "$AUTH_FILE" ]; then
+    echo "ERROR:  Requires an Azure auth file created with --sdk-auth flag"
+    exit 1
+fi
+
+# Does the passed in file exist
+if ! [ -f $AUTH_FILE ]; then
+    echo "File not found!" >&2
+    return 1
+fi
+
+# Determine if this is really a JSON file
+jq -e . >/dev/null 2>&1 <<< cat $1; rc=$?
+if [[ $rc != 0 ]]; then
+    echo "Must be an Azure Auth file in JSON format"
+    return 1
+fi
+JSON=$AUTH_FILE
+
+# Check and see what cloud we are in
+currentCloud=$(az cloud show -o json | jq -er 'select(.name != null) | .name')
+
+if [ -z $currentCloud ]; then
+    echo "Must be signed into Azure.  Please login"
+    return 1
+fi
+
+if [ "$currentCloud" = "$AZURE_GOV_CLOUD" ]; then
+    cloud="USGovernment"
+    location="usgovvirginia"
+elif [ "$currentCloud" = "$AZURE_PUB_CLOUD" ]; then
+    cloud="Public"
+    location="East US"
+else
+    echo "Current cloud not supported via this script"
+    return 1
+fi
+
+# Parse the file looking for some stuff
+clientId=$(cat $JSON | jq -e -r 'select(.clientId != null) | .clientId')
+subscriptionId=$(cat $JSON | jq -e -r 'select(.subscriptionId != null) | .subscriptionId')
+tenantId=$(cat $JSON | jq -e -r 'select(.tenantId != null) | .tenantId')
+secretKey=$(cat $JSON | jq -e -r 'select(.clientSecret != null) | .clientSecret')
+endpoint=$(cat $JSON | jq -e -r 'select(.activeDirectoryEndpointUrl != null) | .activeDirectoryEndpointUrl')
+
+# Check to see if the auth file is for Gov
+if [[ $endpoint =~ "\.us$" ]]; then
+    # Exit if in the wrong cloud
+    if [ "$currentCloud" != $AZURE_GOV_CLOUD ]; then
+        echo "You are logged into the wrong cloud to use this authorization file"
+        return 1
+    fi
+elif [[ $endpoint =~ "\.com$" ]]; then
+    # Exit if in the wrong cloud
+    if [ "$currentCloud" != $AZURE_PUB_CLOUD ]; then
+        echo "You are logged into the wrong cloud to use this authorization file"
+        return 1
+    fi
+else
+    echo "Unsupported cloud in auth file. Exiting."
+    return 1
+fi
+
+
+if [ -z $clientId ]  || [ -z $subscriptionId ] || [ -z $tenantId ] || [ -z $secretKey ] ; then
+    echo "File does not contain one or more of the following:"
+    echo "clientId, subscriptionId, tenantId and/or clientSecret"
+    return 1
+fi
+
+#echo "clientId=$clientId"
+#echo "subscriptionId=$subscriptionId"
+#echo "tenantId=$tenantId"
+#echo "secretKey=$secretKey"
+#echo "endpoint=$endpoint"
+#echo "cloud=$cloud"
+#echo "location=$location"
+
+export APPID=$clientId
+export PASSWORD=$secretKey
+export TENANTID=$tenantId
+
