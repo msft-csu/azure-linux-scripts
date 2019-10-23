@@ -98,4 +98,5 @@ fi
 export APPID=$clientId
 export PASSWORD=$secretKey
 export TENANTID=$tenantId
+export SUBSCRIPTION=$subscriptionId
 
