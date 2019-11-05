@@ -2,7 +2,6 @@
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
-VERSION=1.14.6
 
 usage() { 
     echo "`basename $0`"
@@ -243,6 +242,11 @@ kubectlContextExists() {
     done
 }
 
+getAKSVersions() {
+    AKS_VERSIONS=$(az aks get-versions -l $REGION -o json --query "orchestrators[?isPreview==null].orchestratorVersion" -o tsv)
+    echo $AKS_VERSIONS
+}
+
 installIngress() {
     kubectl create namespace ingress-nginx
     if [ $? -eq 0 ]; then
@@ -337,6 +341,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+
 # Check if Resource Group has been passed in, if not we will create one
 if [ -z "$RG" ]; then
     RG=K8s-$RANDOM
@@ -367,8 +372,8 @@ if [ -z "$DNS" ]; then
     DNS=$(echo $NAME | sed -e 's/-//g' | awk '{print tolower($0)}')
 fi
 
-LOGGED_IN=$( az account show 2>&1 )
-if [[ $LOGGED_IN =~ "ERROR" ]]; then
+az account show 2>&1
+if [ $? -ne 0 ]; then
     echo "ERROR:  Log into azure cli before continuing"
     exit 1
 fi
@@ -386,6 +391,20 @@ if [ -z "$REGION" ]; then
 fi
 
 echo "Using REGION=$REGION"
+
+# Set variables that contains all currently supported versions of AKS
+getAKSVersions
+
+# Check if AKS version is supported in region
+if ! [ -z "$VERSION" ]; then
+    echo $AKS_VERSIONS | grep $VERSION
+    if [ $? -ne 0 ]; then
+        echo "Version not currently supported in region"
+        exit 1
+    fi
+else
+    VERSION=$( echo $AKS_VERSIONS | xargs -n1 | tail -n1 )
+fi
 
 # Check if Cluster and Resource Group already exists
 clusterExists
@@ -451,7 +470,7 @@ if ! [ -z $PROMETHEUS ]; then
 fi
 
 # install KeyVault Controller and Env Injector
-if ! [ -x "$KV" ]; then
+if ! [ -z $KV ]; then
     installKeyVaultTools
 fi
 
