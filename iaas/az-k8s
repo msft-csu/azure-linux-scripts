@@ -399,7 +399,7 @@ getAKSVersions
 if ! [ -z "$VERSION" ]; then
     echo $AKS_VERSIONS | grep $VERSION
     if [ $? -ne 0 ]; then
-        echo "Version not currently supported in region"
+        echo "Version not currently supported in Azure region"
         exit 1
     fi
 else
