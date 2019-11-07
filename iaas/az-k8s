@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
@@ -105,7 +105,7 @@ installIstio(){
     sleep 30 # hack should be removed and use some other way to test completion
     kubectl get crds | grep 'istio.io' | wc -l
 
-    helm install install/kubernetes/helm/istio --wait --name istio \
+    helm install istio.io/istio --wait --name istio \
         --namespace istio-system \
         --set certmanager.enabled=true \
         --set certmanager.email=$INGRESS \
@@ -187,8 +187,9 @@ createAKSCluster() {
 
     # Create AKS Cluster
     echo "Creating AKS Cluster.  This will take some time." 
-        cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
-        eval $cmd
+    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+    eval $cmd
+
     K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
 
     echo "Kubernetes RG=$K8S_RG"
