@@ -337,10 +337,11 @@ fi
 
 helm version -c | grep ^Client
 if [ $? -eq 0 ]; then
-    HELM_VER=3
-else
     HELM_VER=2
+else
+    HELM_VER=3
 fi
+echo "Helm version is $HELM_VER"
 
 command -v kubectl 2&> /dev/null
 if [ $? -ne 0 ]; then
