@@ -286,7 +286,6 @@ subjects:
     namespace: kube-system
 EOF
     helm init \
-        --history-max 200 \
         --service-account tiller \
         --node-selectors "beta.kubernetes.io/os=linux" || exit 1
     waitForPod app=helm name=tiller
