@@ -286,6 +286,7 @@ subjects:
     namespace: kube-system
 EOF
     helm init \
+        --history-max 200 \
         --service-account tiller \
         --node-selectors "beta.kubernetes.io/os=linux" || exit 1
     waitForPod app=helm name=tiller
@@ -332,6 +333,13 @@ command -v helm 2&> /dev/null
 if [ $? -ne 0 ]; then
     echo "ERROR: Requires Helm (helm). Aborting..."
     exit 1
+fi
+
+helm version -c | grep ^Client
+if [ $? -eq 0 ]; then
+    HELM_VER=3
+else
+    HELM_VER=2
 fi
 
 command -v kubectl 2&> /dev/null
@@ -446,8 +454,13 @@ fi
 # Get kubectl context
 az aks get-credentials -n $NAME -g $RG
 
-# Install Helm Tiller
-initializeTiller
+if [ $HELM_VER -eq 2 ]; then
+    # Install Helm Tiller
+    initializeTiller
+else
+    helm repo add stable https://kubernetes-charts.storage.googleapis.com
+    helm repo update
+fi
 
 # Install Ingress Controll
 if ! [ -z $INGRESS ]; then
