@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
@@ -16,6 +16,7 @@ usage() {
     echo "     [-v <kubernetes version> Optional: Version to install of Kubernetes.  Default provided"
     echo "     [-f <yaml file>] Optional: Yaml file to apply after cluster creation."
     echo "     [-p ] Optional: Add Prometheus to cluster"
+    echo "     [-t ] Optional: Add Istio Service Mesh. If -i is also set cert-manager will be installed and configured" 
     echo "     [-b ] Optional: Add Kubenetes Dashboard credentials.  This can be insecure in certain circumstances."
     echo "     [-k ] Optional: Add Azure Key Vault Controller and Env Injector."
     echo "     NOTE:  This program requires az, helm and kubectl to execute"
@@ -89,6 +90,41 @@ installDashboardCredential() {
     kubectl create clusterrolebinding kubernetes-dashboard --clusterrole=cluster-admin --serviceaccount=kube-system:kubernetes-dashboard
 }
 
+installIstio(){
+    if [ -z $INGRESS ]; then
+        echo "ERROR: Ingress email address must also be defined to get a certifcate for Istio"
+        exit 1
+    fi
+
+    AVAILABLE_ISTIO_VERSIONS=$(curl -s "https://api.github.com/repos/istio/istio/tags" | jq -r ".[].name") 
+    ISTIO_VERSION=$(echo $AVAILABLE_ISTIO_VERSIONS | xargs -n1 | grep -v - | sort -V | tail -n1 )
+    echo "Installing $ISTIO_VERSION of Istio CRDs"
+    helm repo add istio.io https://storage.googleapis.com/istio-release/releases/$ISTIO_VERSION/charts/ || exit 1
+    helm repo update || exit 1 
+    helm install istio.io/istio-init --wait || exit 1
+    sleep 30 # hack should be removed and use some other way to test completion
+    kubectl get crds | grep 'istio.io' | wc -l
+
+    helm install istio.io/istio --wait --name istio \
+        --namespace istio-system \
+        --set certmanager.enabled=true \
+        --set certmanager.email=$INGRESS \
+        --set gateways.istio-ingressgateway.sds.enabled=true \
+        --set global.k8sIngress.enabled=true \
+        --set global.k8sIngress.enableHttps=true \
+        --set global.k8sIngress.gatewayName=ingressgateway \
+        --set grafana.enabled=true \
+        --set kiali.enabled=true \
+        --set kiali.createDemoSecret=true \
+        --set kiali.contextPath=/ \
+        --set servicegraph.enabled=true \
+        --set tracing.enabled=true \
+        --set prometheus.enabled=true || exit 1
+
+    waitForPod app=istio-ingressgateway
+
+}
+
 installKeyVaultTools() {
     echo "Install KeyVault Stuff here"
     kubectl create namespace kvtools
@@ -127,7 +163,8 @@ installCertManager() {
 
     waitForPod app.kubernetes.io/instance=cert-manager
 
-    cat << EOF | kubectl apply -f -
+    if [ -z $ISTIO ]; then
+        cat << EOF | kubectl apply -f -
 apiVersion: certmanager.k8s.io/v1alpha1
 kind: ClusterIssuer
 metadata:
@@ -140,7 +177,8 @@ spec:
       name: letsencrypt
     http01: {}
 EOF
-    sleep 10
+        sleep 10
+    fi
 }
 
 createAKSCluster() {
@@ -153,8 +191,14 @@ createAKSCluster() {
 
     # Create AKS Cluster
     echo "Creating AKS Cluster.  This will take some time." 
-        cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
-        eval $cmd
+    if [ -f ~/.ssh/id_rsa.pub ]; then
+        SSH_KEY_SECTION="--ssh-key-value ~/.ssh/id_rsa.pub"
+    else
+        SSH_KEY_SECTION="--generate-ssh-keys"
+    fi
+    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION $SSH_KEY_SECTION --kubernetes-version $VERSION"
+    eval $cmd
+
     K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
 
     echo "Kubernetes RG=$K8S_RG"
@@ -191,7 +235,12 @@ createResourceGroup() {
 # Get PublicIP of Load Balancer
 # Recurse until we have it
 getPublicIPofLoadBalancer() {
-    PUBLIC_IP=$( kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' )
+    if [ -z $ISTIO ]; then
+        PUBLIC_IP=$( kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' )
+    else
+        PUBLIC_IP=$( kubectl get services --namespace=istio-system -l app=istio-ingressgateway -l istio=ingressgateway --no-headers | awk '{print $4}' )
+    fi
+
     if ! [[ $PUBLIC_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         if [ $SECONDS -gt 500 ]; then
             echo "ERROR:  Timed out getting IP of Load Balancer"
@@ -301,7 +350,7 @@ for arg in "$@"; do
   esac
 done
 
-while getopts pbkav:l:i:s:n:g:d:c:f: option
+while getopts pbkatv:l:i:s:n:g:d:c:f: option
 do
     case "${option}"
     in
@@ -310,6 +359,7 @@ do
         p) PROMETHEUS=true;;
         b) DASHBOARD=true;;
         k) KV=true;;
+        t) ISTIO=true;;
         s) SIZE=${OPTARG};;
         n) NAME=${OPTARG};;
         g) RG=${OPTARG};;
@@ -465,11 +515,15 @@ fi
 
 # Install Ingress Controll
 if ! [ -z $INGRESS ]; then
-    installIngress
+    installCertManager
+    if [ -z $ISTIO ]; then
+        installIngress
+    else
+        installIstio
+    fi
     # Setup DNS name for Load Balancer
     setDNSNameForIngress
     echo "Public IP=$PUBLIC_IP"
-    installCertManager
 fi
 
 # Setup cert-manager
