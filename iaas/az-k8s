@@ -184,9 +184,9 @@ EOF
 createAKSCluster() {
     # Enable_Autoscaler has been disabled for now.  That can never be true
     if ! [ -z $ENABLE_AUTOSCALER ]; then
-        SCALE='--enable-cluster-autoscaler --min-count 1 --max-count 5'
+        SCALE='--vm-set-type VirtualMachineScaleSets --enable-cluster-autoscaler --min-count 1 --max-count 5'
     else
-        SCALE='--node-count $NODE_COUNT'
+        SCALE='--vm-set-type AvailabilitySet --node-count $NODE_COUNT'
     fi
 
     # Create AKS Cluster
