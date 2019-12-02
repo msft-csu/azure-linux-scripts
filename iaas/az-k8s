@@ -200,7 +200,7 @@ createAKSCluster() {
     eval $cmd
     if [ $? -ne 0 ]; then
         echo "ERROR:  aks create command failed.  Check stderr"
-        exit $?
+        exit 1 
     fi
 
     K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
