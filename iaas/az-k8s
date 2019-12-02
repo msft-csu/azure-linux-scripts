@@ -121,6 +121,8 @@ installIstio(){
         --set tracing.enabled=true \
         --set prometheus.enabled=true || exit 1
 
+    waitForPod app=istio-ingressgateway
+
 }
 
 installKeyVaultTools() {
@@ -161,7 +163,8 @@ installCertManager() {
 
     waitForPod app.kubernetes.io/instance=cert-manager
 
-    cat << EOF | kubectl apply -f -
+    if [ -z $ISTIO ]; then
+        cat << EOF | kubectl apply -f -
 apiVersion: certmanager.k8s.io/v1alpha1
 kind: ClusterIssuer
 metadata:
@@ -174,7 +177,8 @@ spec:
       name: letsencrypt
     http01: {}
 EOF
-    sleep 10
+        sleep 10
+    fi
 }
 
 createAKSCluster() {
@@ -187,7 +191,12 @@ createAKSCluster() {
 
     # Create AKS Cluster
     echo "Creating AKS Cluster.  This will take some time." 
-    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION --ssh-key-value ~/.ssh/id_rsa.pub --kubernetes-version $VERSION"
+    if [ -f ~/.ssh/id_rsa.pub ]; then
+        SSH_KEY_SECTION="--ssh-key-value ~/.ssh/id_rsa.pub"
+    else
+        SSH_KEY_SECTION="--generate-ssh-keys"
+    fi
+    cmd="az aks create -g $RG -n $NAME $SCALE -l $REGION $SSH_KEY_SECTION --kubernetes-version $VERSION"
     eval $cmd
 
     K8S_RG=$( az resource show -n $NAME -g $RG -o tsv --resource-type Microsoft.ContainerService/managedClusters --query properties.nodeResourceGroup )
