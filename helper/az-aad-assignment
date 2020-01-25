@@ -1,0 +1,57 @@
+#!/bin/bash
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <group>] resource group to use"
+    echo "     [-n <vm name>] name for the VM.  Defaults are supplied if not provided"
+    echo "     [-u <username>] username created on the VM. Defaults are supplied if not provided"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts g:n:u: option
+do
+    case "${option}"
+    in
+        g) RG=${OPTARG};;
+        n) VNAME=${OPTARG};;
+        u) USERNAME=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z "$RG" ]; then
+    echo "ERROR:  Must provide Resource Group"
+    exit 1
+fi
+
+if [ -z "$VNAME" ]; then
+    echo "ERROR:  Must provide VM Name"
+    exit 1
+fi
+
+if [ -z "$USERNAME" ]; then
+    echo "ERROR:  Must provide Microsoft AAD username with fully qualified domain (aka.  username@contoso.com)"
+    exit 1
+fi
+
+USER_NAME=$(az account show --query user.name --output tsv)
+VM_ID=$(az vm show --resource-group $RG --name $VNAME --query id -o tsv)
+
+az role assignment create \
+    --role "Virtual Machine Administrator Login" \
+    --assignee $USERNAME \
+    --scope $VM_ID || exit 1
+
+
