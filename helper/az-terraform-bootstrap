@@ -33,7 +33,7 @@ do
         r) REGION=${OPTARG};;
         c) CONTAINER_NAME=${OPTARG};;
         a) STORAGE_ACCOUNT_NAME=${OPTARG};;
-        t) SAS_TOKEN=true;;
+        t) USE_SAS=true;;
         *) usage;;
         : ) usage;;
     esac
@@ -63,8 +63,8 @@ if [ -z "$CONTAINER_NAME" ]; then
     CONTAINER_NAME=tfcont-$RND
 fi
 
-if [ -z "$SAS_TOKEN" ]; then
-    SAS_TOKEN=false
+if [ -z "$USE_SAS" ]; then
+    USE_SAS=false
 fi
 
     echo -e "The following resources will be created...\n"
@@ -72,7 +72,7 @@ fi
 echo "RESOURCE_GROUP:       $RESOURCE_GROUP_NAME"
 echo "STORAGE_ACCT_NAME:    $STORAGE_ACCOUNT_NAME"
 echo "CONTAINER_NAME:       $CONTAINER_NAME"
-echo "SAS_TOKEN generated:  $SAS_TOKEN"
+echo "SAS_TOKEN generated:  $USE_SAS"
 echo -e "REGION:               $REGION\n"
 
 read -p "Are you sure you want to Proceed [y/N]?"
@@ -93,14 +93,30 @@ ACCOUNT_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP_NAME
 # Create blob container
 az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT_NAME --account-key $ACCOUNT_KEY 1>/dev/null
 
-if [ $SAS_TOKEN == "true" ]; then
+if [ $USE_SAS == "true" ]; then
     END=`date -u -d "1 month" '+%Y-%m-%dT%H:%MZ'`
-    SAS=`az storage container generate-sas -n $CONTAINER_NAME --https-only --permissions dlrw --expiry $END -o tsv`
+    SAS=`az storage container generate-sas --account-key $ACCOUNT_KEY --account-name $STORAGE_ACCOUNT_NAME -n $CONTAINER_NAME --https-only --permissions dlrw --expiry $END -o tsv`
 fi
 
 echo "storage_account_name: $STORAGE_ACCOUNT_NAME"
 echo "container_name: $CONTAINER_NAME"
-echo "access_key: $ACCOUNT_KEY"
-if [ $SAS_TOKEN == "true" ]; then
-    echo "sas token: $SAS"
+
+TF_CONTENT=$(cat <<-EOF
+terraform {
+  backend "azurerm" {
+    storage_account_name    = "$STORAGE_ACCOUNT_NAME"
+    container_name          = "$CONTAINER_NAME"
+    key                     = "prod.terraform.tfstate"
+  }
+}
+EOF
+)
+
+echo -e "$TF_CONTENT"
+
+echo "Use the previous HCL in your main.tf"
+echo "Ensure you set one of the following env vars..."
+if [ $USE_SAS == "true" ]; then
+    echo "ARM_SAS_TOKEN=$SAS"
 fi
+echo "ARM_ACCESS_KEY=$ACCOUNT_KEY"
