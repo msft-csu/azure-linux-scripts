@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 SIZE=Standard_DS2_v2
 RND=$(echo $RANDOM | grep -o ..$)
 NODE_COUNT=2
@@ -69,7 +69,7 @@ randomChar() {
 }
 
 randomNum() {
-    echo -n $(( $RANDOM % 10 ))
+    echo -n $(( $RANDOM % 100 ))
 }
 
 installPrometheus() {
@@ -107,7 +107,7 @@ installIstio(){
     sleep 30 # hack should be removed and use some other way to test completion
     kubectl get crds | grep 'istio.io' | wc -l
 
-    helm install istio.io/istio --wait --name istio \
+    helm install istio istio.io/istio --wait \
         --namespace istio-system \
         --set certmanager.enabled=true \
         --set certmanager.email=$INGRESS \
@@ -132,20 +132,23 @@ installKeyVaultTools() {
     kubectl create namespace kvtools
     helm repo add spv-charts http://charts.spvapi.no
     helm repo update
-    helm install spv-charts/azure-key-vault-controller --set installCrd=false --namespace kvtools
+    helm install spv-charts/azure-key-vault-controller --set installCrd=false --namespace kvtools --generate-name
     waitForPod app=azure-key-vault-controller
     
-    helm install spv-charts/azure-key-vault-env-injector --namespace kvtools
+    helm install spv-charts/azure-key-vault-env-injector --namespace kvtools --generate-name
     waitForPod app=azure-key-vault-env-injector
 
 }
 
 installCertManager() {
     # Install CRD for cert-manager
-    kubectl apply -f https://raw.githubusercontent.com/jetstack/cert-manager/release-0.10/deploy/manifests/00-crds.yaml
+    kubectl apply -f --validate=false -f https://raw.githubusercontent.com/jetstack/cert-manager/release-0.13/deploy/manifests/00-crds.yaml
 
     # Create namespace
     kubectl create namespace cert-manager
+
+    # Label the ingress namespace to disable resource validation
+    kubectl label namespace ingress cert-manager.io/disable-validation=true
 
     # Label the cert-manager namespace to disable resource validation
     kubectl label namespace cert-manager certmanager.k8s.io/disable-validation=true
@@ -158,10 +161,9 @@ installCertManager() {
 
     # Install the cert-manager Helm chart
     helm install \
-      --name cert-manager \
       --namespace cert-manager \
-      --version v0.10.0 \
-      jetstack/cert-manager
+      --version v0.13.0 \
+      cert-manager jetstack/cert-manager
 
     waitForPod app.kubernetes.io/instance=cert-manager
 
@@ -242,7 +244,7 @@ createResourceGroup() {
 # Recurse until we have it
 getPublicIPofLoadBalancer() {
     if [ -z $ISTIO ]; then
-        PUBLIC_IP=$( kubectl get services --namespace=ingress-nginx -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' )
+        PUBLIC_IP=$( kubectl get services --namespace=ingress -l app=nginx-ingress -l component=controller --no-headers | awk '{print $4}' )
     else
         PUBLIC_IP=$( kubectl get services --namespace=istio-system -l app=istio-ingressgateway -l istio=ingressgateway --no-headers | awk '{print $4}' )
     fi
@@ -287,7 +289,7 @@ clusterExists() {
 }
 
 kubectlContextExists() {
-    IFS=$'\n'
+    local IFS=$'\n'
     for context in $(kubectl config get-contexts --no-headers);
     do
         current=$(echo $context | awk '{print $2}')
@@ -303,18 +305,19 @@ getAKSVersions() {
 }
 
 installIngress() {
-    kubectl create namespace ingress-nginx
+    kubectl create namespace ingress
     if [ $? -eq 0 ]; then
-        helm install stable/nginx-ingress \
-            --namespace ingress-nginx \
-            --set controller.service.externalTrafficPolicy=Local \
+# Use Helm to deploy an NGINX ingress controller
+        helm install nginx-ingress stable/nginx-ingress \
+            --namespace ingress \
+            --set controller.replicaCount=2 \
             --set controller.nodeSelector."beta\.kubernetes\.io/os"=linux \
             --set defaultBackend.nodeSelector."beta\.kubernetes\.io/os"=linux
         if [ $? -ne 0 ]; then
             echo "Failed to install nginx-ingress helm package"
             exit 1
         fi
-        kubectl get service -l app=nginx-ingress --namespace ingress-nginx
+        kubectl get service -l app=nginx-ingress --namespace ingress
         waitForPod app=nginx-ingress component=controller
     fi
 }
@@ -394,6 +397,8 @@ fi
 helm version -c | grep ^Client
 if [ $? -eq 0 ]; then
     HELM_VER=2
+    echo "This program supports ONLY Helm v3+"
+    exit 1
 else
     HELM_VER=3
 fi
@@ -511,12 +516,12 @@ fi
 # Get kubectl context
 az aks get-credentials -n $NAME -g $RG
 
-if [ $HELM_VER -eq 2 ]; then
-    # Install Helm Tiller
-    initializeTiller
-else
+if [ $HELM_VER -eq 3 ]; then
     helm repo add stable https://kubernetes-charts.storage.googleapis.com
     helm repo update
+else
+    echo "HELM version not supported"
+    exit 1
 fi
 
 # Install Ingress Controll
