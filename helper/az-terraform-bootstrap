@@ -1,0 +1,106 @@
+#!/bin/bash
+
+set -o errexit  # exit if any statement returns a non-true return value
+
+# 3 digit random number
+RND=$(echo $RANDOM | grep -o ...$)
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <group>] resource group to use."
+    echo "     [-r <region>] region to use. EastUs or USGovVirginia are defaults"
+    echo "     [-s <storageacct-name>] storage account name to use."
+    echo "     [-c <container-name>] container name to use."
+    echo "     [-t (optional) will generate SAS token]"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts tg:c:s:r: option
+do
+    case "${option}"
+    in
+        g) RESOURCE_GROUP_NAME=${OPTARG};;
+        r) REGION=${OPTARG};;
+        c) CONTAINER_NAME=${OPTARG};;
+        a) STORAGE_ACCOUNT_NAME=${OPTARG};;
+        t) SAS_TOKEN=true;;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+# Check if Region is passed in, otherwise eastus will be used
+if [ -z "$REGION" ]; then
+    # check if in gov or commercial
+    CLOUD=`az account list-locations -o json | jq -r '.[0].name'`
+    if [ ${CLOUD:0:5} = "usgov" ]; then
+        REGION='usgovvirginia'
+    else
+        REGION='eastus'
+    fi
+fi
+
+if [ -z "$RESOURCE_GROUP_NAME" ]; then
+    RESOURCE_GROUP_NAME=TFSTATE-RG
+fi
+
+if [ -z "$STORAGE_ACCOUNT_NAME" ]; then
+    STORAGE_ACCOUNT_NAME=tfstateacct$RND
+fi
+
+if [ -z "$CONTAINER_NAME" ]; then
+    CONTAINER_NAME=tfcont-$RND
+fi
+
+if [ -z "$SAS_TOKEN" ]; then
+    SAS_TOKEN=false
+fi
+
+    echo -e "The following resources will be created...\n"
+
+echo "RESOURCE_GROUP:       $RESOURCE_GROUP_NAME"
+echo "STORAGE_ACCT_NAME:    $STORAGE_ACCOUNT_NAME"
+echo "CONTAINER_NAME:       $CONTAINER_NAME"
+echo "SAS_TOKEN generated:  $SAS_TOKEN"
+echo -e "REGION:               $REGION\n"
+
+read -p "Are you sure you want to Proceed [y/N]?"
+if ! [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Maybe next time!"
+    exit 1 
+fi
+
+# Create resource group
+az group create --name $RESOURCE_GROUP_NAME --location $REGION 1>/dev/null
+
+# Create storage account
+az storage account create --resource-group $RESOURCE_GROUP_NAME --name $STORAGE_ACCOUNT_NAME --sku Standard_LRS --encryption-services blob 1>/dev/null
+
+# Get storage account key
+ACCOUNT_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP_NAME --account-name $STORAGE_ACCOUNT_NAME --query [0].value -o tsv)
+
+# Create blob container
+az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCOUNT_NAME --account-key $ACCOUNT_KEY 1>/dev/null
+
+if [ $SAS_TOKEN == "true" ]; then
+    END=`date -u -d "1 month" '+%Y-%m-%dT%H:%MZ'`
+    SAS=`az storage container generate-sas -n $CONTAINER_NAME --https-only --permissions dlrw --expiry $END -o tsv`
+fi
+
+echo "storage_account_name: $STORAGE_ACCOUNT_NAME"
+echo "container_name: $CONTAINER_NAME"
+echo "access_key: $ACCOUNT_KEY"
+if [ $SAS_TOKEN == "true" ]; then
+    echo "sas token: $SAS"
+fi

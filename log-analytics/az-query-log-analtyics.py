@@ -72,7 +72,6 @@ def get_token(add, resource, tenant_id, client_id, secret_key ):
     data=response.json()
     return data["access_token"]
 
-
 def get_query_data(filename):
     with open(filename) as f: 
         data = f.read() 
@@ -171,10 +170,6 @@ def main(query_file, azure_auth, timespan, output, debug, workspace_id):
         prAttn(f"{kql_data}")
         prAttn("====================================================================")
         print(df.to_string(index=False))
-
-
-
-
 
 if __name__ == "__main__":
     main()
