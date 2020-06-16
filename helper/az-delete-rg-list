@@ -1,0 +1,34 @@
+#!/bin/bash
+
+read -p "What query world would you like to use to delete resource groups? "
+if [[ "$REPLY" = "" ]]; then
+    exit 1
+fi
+
+RGS=$(az group list -o json | jq .[] | jq "select((.name) and (.name | contains(\"$REPLY\")))" | jq -r .name)
+
+if [ -z "$RGS" ]; then
+    echo "There was no resource groups found that have '$REPLY' in them"
+    exit 0
+fi
+
+echo "The following resource groups will be deleted:"
+for RG in $RGS; do
+    echo $RG
+done
+
+read -p "Are you sure you want to delete these resource groups [y/N]?"
+if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+    exit 1
+fi
+
+read -p "Are you REALLY sure.  There is no coming back [y/N]?"
+if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+    exit 1
+fi
+
+for RG in $RGS; do
+    echo "Deleting $RG"
+    az group delete --resource-group $RG --yes
+done
+

@@ -24,35 +24,10 @@ usage() {
 }
 
 # Recurse until we have it
-waitForPod() {
-    QUERY=""
-    for label in "$@"; do
-        echo $label
-        QUERY+="-l $label "
-    done
-    echo $QUERY
-    SECONDS=0
-#    queryPod
-    queryPodList
-    unset SECONDS
-}
-
-queryPodList() {
-    CMD="kubectl get pods --all-namespaces $QUERY --no-headers"
-    POD_RESULTS=`eval $CMD`
-    IFS=$'\n'
-    for result in $POD_RESULTS; do
-        echo $result
-        READY=$( echo $result | awk '{print $3}' | cut -d "/" -f 1 )
-        RUNNING=$( echo $result | awk '{print $4}' ) 
-        if [ "$RUNNING" != "Running" ] || [ $READY -eq 0 ]; then
-            sleep 10
-            queryPodList
-            if [ $SECONDS -gt 500 ]; then
-                echo "ERROR:  Timed out waiting for pod to start"
-                exit 1
-            fi
-        fi
+waitForPodComplete() {
+    for namespace in "$@"; do
+        echo $namespace
+        sleep 5; while echo && kubectl get pods -n $namespace | grep -v -E "(Running|Completed|STATUS)"; do sleep 5; done
     done
 }
 
@@ -84,7 +59,7 @@ installPrometheus() {
     sleep 10
     helm install stable/prometheus-operator --name prometheus-operator --namespace monitor --set prometheusOperator.createCustomResource=false
     
-    waitForPod release=prometheus-operator
+    waitForPodComplete monitor 
 }
 
 installDashboardCredential() {
@@ -123,7 +98,7 @@ installIstio(){
         --set tracing.enabled=true \
         --set prometheus.enabled=true || exit 1
 
-    waitForPod app=istio-ingressgateway
+    waitForPodComplete istio-system 
 
 }
 
@@ -133,10 +108,10 @@ installKeyVaultTools() {
     helm repo add spv-charts http://charts.spvapi.no
     helm repo update
     helm install spv-charts/azure-key-vault-controller --set installCrd=false --namespace kvtools --generate-name
-    waitForPod app=azure-key-vault-controller
+    waitForPodComplete kvtools 
     
     helm install spv-charts/azure-key-vault-env-injector --namespace kvtools --generate-name
-    waitForPod app=azure-key-vault-env-injector
+    waitForPodComplete kvtools 
 
 }
 
@@ -165,7 +140,7 @@ installCertManager() {
       --version v0.13.0 \
       cert-manager jetstack/cert-manager
 
-    waitForPod app.kubernetes.io/instance=cert-manager
+    waitForPodComplete cert-manager
 
     if [ -z $ISTIO ]; then
         cat << EOF | kubectl apply -f -
@@ -318,7 +293,7 @@ installIngress() {
             exit 1
         fi
         kubectl get service -l app=nginx-ingress --namespace ingress
-        waitForPod app=nginx-ingress component=controller
+        waitForPodComplete ingress
     fi
 }
 
@@ -347,7 +322,7 @@ EOF
         --history-max 200 \
         --service-account tiller \
         --node-selectors "beta.kubernetes.io/os=linux" || exit 1
-    waitForPod app=helm name=tiller
+    waitForPodComplete kube-system
 }
 
 # Catch any help requests
