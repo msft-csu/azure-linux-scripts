@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 # az-create-website - Author: Brent McConnell
 # 
 #
@@ -80,10 +80,6 @@ if [ -z "$PROMPT" ]; then
         exit 0
     fi
 fi
-
-echo "Moving on"
-
-exit 0
 
 
 echo "Checking for required www.${STOR_NAME} and web.$STOR_NAME records in DNS"
@@ -208,10 +204,15 @@ fi
 
 echo $WEB_DOMAIN
 
-echo "Creating Premium Verizon CDN"
+echo "Creating Microsoft Standard CDN"
 az cdn profile create --resource-group $RG_NAME \
     --name ${STOR_NAME}cdn \
-    --sku Premium_Verizon || exit 1
+    --sku Standard_Microsoft || exit 1
+
+# echo "Creating Premium Verizon CDN"
+# az cdn profile create --resource-group $RG_NAME \
+#     --name ${STOR_NAME}cdn \
+#     --sku Premium_Verizon || exit 1
 
 echo "Creating Endpoint in CDN"
 az cdn endpoint create --name ${STOR_NAME} \
@@ -232,3 +233,18 @@ az cdn custom-domain enable-https --endpoint-name $STOR_NAME \
     --name www \
     --profile-name ${STOR_NAME}cdn \
     --resource-group $RG_NAME || exit 1
+
+echo "Creating Redirect rule for http to https"
+az cdn endpoint rule add \
+  -g $RG_NAME \
+  -n ${STOR_NAME} \
+  --profile-name ${STOR_NAME}cdn \
+  --order 1 \
+  --rule-name "redirect" \
+  --match-variable RequestScheme \
+  --operator Equal \
+  --match-values HTTPS \
+  --action-name "UrlRedirect" \
+  --redirect-protocol Https \
+  --redirect-type Moved
+

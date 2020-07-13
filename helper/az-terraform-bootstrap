@@ -46,6 +46,7 @@ usage() {
     echo "     [-v <vault-name>] keyvault to use to service principal"
     echo "     [-t (optional) will generate SAS token]"
     echo "     [-f (optional) will generate basic main.tf"
+    echo "     [-a (optional) Azure DevOps project that will contain pipeline"
     exit 1
 }
 
@@ -58,11 +59,12 @@ for arg in "$@"; do
   esac
 done
 
-while getopts tfg:c:s:r:n:v:p: option
+while getopts tfg:a:c:s:r:n:v:p: option
 do
     case "${option}"
     in
         g) TF_RESOURCE_GROUP=${OPTARG};;
+        a) AZURE_DEVOPS_PROJECT=${OPTARG};;
         p) PROJ_RESOURCE_GROUP=${OPTARG};;
         n) NAMING_PREFIX=${OPTARG};;
         r) REGION=${OPTARG};;
@@ -79,6 +81,10 @@ shift "$(($OPTIND -1))"
 
 if [ -z $CREATE_FILE ]; then
     CREATE_FILE=true
+fi
+
+if [ -z $AZURE_DEVOPS_PROJECT ]; then
+    AZURE_DEVOPS_PROJECT="Terraform-iac"
 fi
 
 # Check if Region is passed in, otherwise eastus will be used
@@ -142,6 +148,7 @@ echo "CONTAINER_NAME:       $CONTAINER_NAME"
 echo "CREATE_FILE:          $CREATE_FILE"
 echo "SAS_TOKEN generated:  $USE_SAS"
 echo "KEYVAULT_NAME:        $KEYVAULT_NAME"
+echo "AZURE_DEVOPS_PROJECT: $AZURE_DEVOPS_PROJECT"
 echo "REGION:               $REGION\n"
 
 read -p "Are you sure you want to Proceed [y/N]?"
@@ -394,7 +401,7 @@ steps:
 #KEY VAULT TASK
 - task: AzureKeyVault@1
   inputs:
-    azureSubscription: 'devops-sp'
+    azureSubscription: 'TFSTATE-RG-READ-SP-$AZURE_DEVOPS_PROJECT'
     KeyVaultName: '$KEYVAULT_NAME'
     SecretsFilter: 'sp-client-id-tf-${RND},sp-cert-tf-${RND},sp-tenant-id-tf-${RND},sp-subscription-id-tf-${RND},ak-backend-sa-$RND'
   displayName: 'Get key vault secrets as pipeline variables'
