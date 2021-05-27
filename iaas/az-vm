@@ -277,10 +277,19 @@ for i in `seq 1 $COUNT`; do
       --image $IMAGE \
       --size $SIZE \
       --admin-username $USERNAME \
-      --assign-identity \
-      --scope $GROUP_ID \
-      --role owner \
       $PASSWORD_STR $CUSTOM_DATA 1>/dev/null || exit 1
+    
+      # az vm create \
+      # --resource-group $RG \
+      # --name $VMNAME \
+      # --nics $NIC-$RAND \
+      # --image $IMAGE \
+      # --size $SIZE \
+      # --admin-username $USERNAME \
+    #  --assign-identity \
+    #  --scope $GROUP_ID \
+    #  --role owner \
+    #  $PASSWORD_STR $CUSTOM_DATA 1>/dev/null || exit 1
 
     # Add VM to an array for later use.  This is primarily so that cloud-init
     # can complete before trying to setup analytics.  By processing the test 

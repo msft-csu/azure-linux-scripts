@@ -1,0 +1,115 @@
+#!/bin/bash
+# az-vm-snap-disk - Author: Brent McConnell
+# 
+#
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for
+# license information.
+# 
+# Snapshots a VMs disk either individually or for an entire resource group
+# depending on the parameters you pass
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-n <name>] Name of VM"
+    echo "     [-g <group>] resource group to use"
+    echo "     [-d ] include data disks otherwise only OS Disk is snapped"
+    echo "     [-i ] ignore prompts and just run. Be careful!" 
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help | -h) 
+        usage
+        ;;
+  esac
+done
+
+validateTools() {
+echo "Check program requirements..."
+(
+    set +e
+    programs=(az awk jq)
+    missing=0
+    for i in ${programs[@]}; do
+        command -v $i 2&> /dev/null
+        if [ $? -eq 0 ]; then
+            echo " * Found $i"
+        else
+            echo " * ERROR: missing $i"
+            missing=1
+        fi
+    done
+    if [[ "$missing" -ne 0 ]]; then
+        echo "Missing required commands"
+        exit 1
+    fi
+)
+}
+
+validateTools
+
+while getopts g:n:di option
+do
+    case "${option}"
+    in
+        g) RG=${OPTARG};;
+        n) VNAME=${OPTARG};;
+        d) SNAPDATA=true;;
+        i) NO_PROMPT=true;;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z $RG ]; then
+  echo "-g required.  Resource group is required"
+  exit 1
+fi
+
+if [ -z $VNAME ] && [ -z $NO_PROMPT ]; then
+  # Verify if we want to proceed if running in interactive mode
+  echo -e "\nNOTE: This is going to snapshot disks for all VMs in Resource Group $RG!\n"
+  read -p "Are you sure you want to Proceed [y/N]?"
+  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+      exit 1
+  fi
+  echo "Snapshots for all disks in $RG will be created!"
+fi
+
+NOW=$( date +'%m%d%Y-%H%M%S' )
+
+if [ -z $VNAME ]; then
+  # Grab all the VMs if we are doing the resource group
+  VMNAMES=$( az vm list -g $RG | jq -r ".[] | .name" | tr '\n' ' ' )
+else
+  #Otherwise just use what was passed in
+  VMNAMES=$VNAME
+fi
+
+for VM in $VMNAMES; do
+  echo "Grab VM Info for NAME=$VM"
+  echo "=================================="
+  #Grab VM Info
+  JSON=$( az vm show -g $RG --name $VM -o json )
+
+  #Snap OS Disk
+  for OS_ID in $( echo $JSON | jq -r '.storageProfile.osDisk.managedDisk | .id' ); do
+    NAME=$(echo $OS_ID | awk -F / '{print $NF}')
+    echo "Snapping OS Disk for $VM..."
+    az snapshot create -n $NAME-$NOW-snap -g $RG --source $OS_ID --query "{DiskName:name, DiskID:id}"
+  done
+
+  #Snap Data Disks if required
+  if [ "$SNAPDATA" == "true" ]; then
+    for DISK_ID in $( echo $JSON | jq -r '.storageProfile.dataDisks[].managedDisk | .id' ); do
+      NAME=$(echo $DISK_ID | awk -F / '{print $NF}')
+      echo "Snapping Data Disks for $VM..."
+      az snapshot create -n $NAME-$NOW-snap -g $RG --source $DISK_ID --query "{DiskName:name, DiskID:id}"
+    done
+  fi
+done
