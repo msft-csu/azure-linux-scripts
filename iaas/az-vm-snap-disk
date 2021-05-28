@@ -14,8 +14,9 @@ usage() {
     echo "   Usage: " 
     echo "     [-n <name>] Name of VM"
     echo "     [-g <group>] resource group to use"
-    echo "     [-d ] include data disks otherwise only OS Disk is snapped"
-    echo "     [-i ] ignore prompts and just run. Be careful!" 
+    echo "     (-t <group>) optional: target resource group to place snapshots in. Default is the scanned resource group"
+    echo "     (-d ) include data disks otherwise only OS Disk is snapped"
+    echo "     (-i ) ignore prompts and just run. Be careful!" 
     exit 1
 }
 
@@ -52,12 +53,13 @@ echo "Check program requirements..."
 
 validateTools
 
-while getopts g:n:di option
+while getopts g:n:t:di option
 do
     case "${option}"
     in
         g) RG=${OPTARG};;
         n) VNAME=${OPTARG};;
+        t) TRG=${OPTARG};;
         d) SNAPDATA=true;;
         i) NO_PROMPT=true;;
         *) usage;;
@@ -71,6 +73,11 @@ if [ -z $RG ]; then
   exit 1
 fi
 
+if [ -z $TRG ]; then
+  TRG=$RG
+fi
+
+echo "Setting Target Resource Group = $TRG"
 
 NOW=$( date +'%m%d%Y-%H%M%S' )
 
@@ -84,14 +91,14 @@ fi
 
 if [ -z $NO_PROMPT ]; then
   # Verify if we want to proceed if running in interactive mode
-  echo -e "\nNOTE: This is going to snapshot disks for VMs '$VMNAMES' in $RG!\n"
+  echo -e "\nNOTE: This is going to snapshot disks for VMs '$VMNAMES' in '$RG' and place in '$TRG'!\n"
   read -p "Are you sure you want to Proceed [y/N]?"
   if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
       exit 1
   fi
 fi
 
-echo "Snapshots for $VMNAMES in $RG will be created!"
+echo "Snapshots for $VMNAMES in $RG will be created in '$TRG'!"
 
 for VM in $VMNAMES; do
   echo "Grab VM Info for NAME=$VM"
@@ -103,7 +110,7 @@ for VM in $VMNAMES; do
   for OS_ID in $( echo $JSON | jq -r '.storageProfile.osDisk.managedDisk | .id' ); do
     NAME=$(echo $OS_ID | awk -F / '{print $NF}')
     echo "Snapping OS Disk for $VM..."
-    az snapshot create -n $NAME-$NOW-snap -g $RG --source $OS_ID --query "{DiskName:name, DiskID:id}"
+    az snapshot create -n $NAME-$NOW-snap -g $TRG --source $OS_ID --query "{DiskName:name, DiskID:id}"
   done
 
   #Snap Data Disks if required
@@ -111,7 +118,7 @@ for VM in $VMNAMES; do
     for DISK_ID in $( echo $JSON | jq -r '.storageProfile.dataDisks[].managedDisk | .id' ); do
       NAME=$(echo $DISK_ID | awk -F / '{print $NF}')
       echo "Snapping Data Disks for $VM..."
-      az snapshot create -n $NAME-$NOW-snap -g $RG --source $DISK_ID --query "{DiskName:name, DiskID:id}"
+      az snapshot create -n $NAME-$NOW-snap -g $TRG --source $DISK_ID --query "{DiskName:name, DiskID:id}"
     done
   fi
 done
