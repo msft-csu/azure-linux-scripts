@@ -1,0 +1,110 @@
+#!/bin/bash
+# az-delete-snap - Author: Brent McConnell
+# 
+#
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License. See License.txt in the project root for
+# license information.
+# 
+# Delete snapshots older than some date 
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <group>] resource group to scan for snapshots to delete"
+    echo "     [-n <num>] number of days of snapshots to keep"
+    echo "     (-i ) optional: ignore prompts and just run. VERY DANGEROUS" 
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help | -h) 
+        usage
+        ;;
+  esac
+done
+
+validateTools() {
+echo "Check program requirements..."
+(
+    set +e
+    programs=(az awk jq)
+    missing=0
+    for i in ${programs[@]}; do
+        command -v $i 2&> /dev/null
+        if [ $? -eq 0 ]; then
+            echo " * Found $i"
+        else
+            echo " * ERROR: missing $i"
+            missing=1
+        fi
+    done
+    if [[ "$missing" -ne 0 ]]; then
+        echo "Missing required commands"
+        exit 1
+    fi
+)
+}
+
+validateTools
+
+while getopts g:n:i option
+do
+    case "${option}"
+    in
+        g) RG=${OPTARG};;
+        n) DAYS=${OPTARG};;
+        i) NO_PROMPT=true;;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+PROGNAME=$(basename $0)
+
+echo "Starting Execution of $PROGNAME"
+echo "======================================"
+
+if [ -z $RG ]; then
+  echo "-g required.  Resource group is required"
+  exit 1
+fi
+
+if [ -z $DAYS ]; then
+  echo "-n required.  Number of days to keep is required"
+  exit 1
+fi
+
+if ! [[ "$DAYS" == [\+\-]* ]]; then
+  # The default is in the past
+  DAYS="-$DAYS"
+fi
+
+# Date to delete before
+DELETE_DATE=$( date -v ${DAYS}d '+%Y-%m-%d' )
+
+# Snapshots effected
+SNAPSHOTS=$(az resource list -g $RG --query "[?type=='Microsoft.Compute/snapshots' && createdTime<'$DELETE_DATE']")
+
+echo $SNAPSHOTS | jq -r '.[].name'
+
+if [ -z $NO_PROMPT ]; then
+  # Verify if we want to proceed if running in interactive mode
+  echo -e "\nNOTE: This is going to delete the above snapshots created before $DELETE_DATE!\n"
+  read -p "Are you sure you want to Proceed [y/N]?"
+  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+      exit 1
+  fi
+fi
+
+#Snap Disk
+for DISK_ID in $( echo $SNAPSHOTS | jq -r '.[] | .id' ); do
+  NAME=$(echo $DISK_ID | awk -F / '{print $NF}')
+  echo "Deleting Snapshot = $NAME..."
+  az snapshot delete --ids $DISK_ID 
+done
+
+
