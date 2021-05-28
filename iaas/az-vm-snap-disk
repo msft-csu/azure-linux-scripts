@@ -71,15 +71,6 @@ if [ -z $RG ]; then
   exit 1
 fi
 
-if [ -z $VNAME ] && [ -z $NO_PROMPT ]; then
-  # Verify if we want to proceed if running in interactive mode
-  echo -e "\nNOTE: This is going to snapshot disks for all VMs in Resource Group $RG!\n"
-  read -p "Are you sure you want to Proceed [y/N]?"
-  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
-      exit 1
-  fi
-  echo "Snapshots for all disks in $RG will be created!"
-fi
 
 NOW=$( date +'%m%d%Y-%H%M%S' )
 
@@ -90,6 +81,17 @@ else
   #Otherwise just use what was passed in
   VMNAMES=$VNAME
 fi
+
+if [ -z $NO_PROMPT ]; then
+  # Verify if we want to proceed if running in interactive mode
+  echo -e "\nNOTE: This is going to snapshot disks for VMs '$VMNAMES' in $RG!\n"
+  read -p "Are you sure you want to Proceed [y/N]?"
+  if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
+      exit 1
+  fi
+fi
+
+echo "Snapshots for $VMNAMES in $RG will be created!"
 
 for VM in $VMNAMES; do
   echo "Grab VM Info for NAME=$VM"
