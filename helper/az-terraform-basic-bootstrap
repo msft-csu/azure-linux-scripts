@@ -1,0 +1,508 @@
+#!/bin/bash
+
+# This script bootstraps a Terraform project for Azure DevOps
+# Running this script will create a remote tfstate file in a storage account.
+# It also will create a Project oriented resource group and a service principle.
+# The service principal has Contributor for the resource group created and is 
+# stored in a keyvault that can be accessed by Azure DevOps to configure the 
+# Terraform scripts that are generated
+
+
+set -o errexit  # exit if any statement returns a non-true return value
+shopt -s expand_aliases
+
+# 3 digit random number
+RND=$(echo $RANDOM | grep -o ....$)
+
+echo "Check program requirements..."
+(
+    set +e
+    programs=(az)
+    missing=0
+    for i in ${programs[@]}; do
+        command -v $i 2&> /dev/null
+        if [ $? -eq 0 ]; then
+            echo " * Found $i"
+        else
+            echo " * ERROR: missing $i"
+            missing=1
+        fi
+    done
+    if [[ "$missing" -ne 0 ]]; then
+        echo "Missing required commands"
+        exit 1
+    fi
+)
+
+usage() { 
+    echo "`basename $0`"
+    echo "   Usage: " 
+    echo "     [-g <state resource group>] terraform state resource group to use."
+    echo "     [-p <project resource group> project resource group to create"
+    echo "     [-r <region>] region to use. EastUs or USGovVirginia are defaults"
+    echo "     [-s <storageacct-name>] storage account name to use."
+    echo "     [-c <container-name>] container name to use."
+    echo "     [-n <prefix-name>] naming prefix to use."
+    echo "     [-v <vault-name>] keyvault to use to service principal"
+    echo "     [-t (optional) will generate SAS token]"
+    echo "     [-f (optional) will generate basic main.tf"
+    echo "     [-a (optional) Azure DevOps project that will contain pipeline"
+    exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts tfg:a:c:s:r:n:v:p: option
+do
+    case "${option}"
+    in
+        g) TF_RESOURCE_GROUP=${OPTARG};;
+        a) AZURE_DEVOPS_PROJECT=${OPTARG};;
+        p) PROJ_RESOURCE_GROUP=${OPTARG};;
+        n) NAMING_PREFIX=${OPTARG};;
+        r) REGION=${OPTARG};;
+        c) CONTAINER_NAME=${OPTARG};;
+        a) STORAGE_ACCT_NAME=${OPTARG};;
+        t) USE_SAS=true;;
+        f) CREATE_FILE=true;;
+        v) KEYVAULT_NAME=${OPTARG};;
+        *) usage;;
+        : ) usage;;
+    esac
+done
+shift "$(($OPTIND -1))"
+
+if [ -z $CREATE_FILE ]; then
+    CREATE_FILE=true
+fi
+
+if [ -z $AZURE_DEVOPS_PROJECT ]; then
+    AZURE_DEVOPS_PROJECT="Terraform-iac"
+fi
+
+# Check if Region is passed in, otherwise eastus will be used
+if [ -z "$REGION" ]; then
+    # check if in gov or commercial
+    CLOUD=`az account list-locations -o json | jq -r '.[0].name'`
+    if [ ${CLOUD:0:5} = "usgov" ]; then
+        REGION='usgovvirginia'
+    else
+        REGION='eastus'
+    fi
+fi
+
+if [ -z "$TF_RESOURCE_GROUP" ]; then
+    TF_RESOURCE_GROUP=TFSTATE-RG
+fi
+
+if [ -z "$PROJ_RESOURCE_GROUP" ]; then
+    PROJ_RESOURCE_GROUP=PROJECT-${RND}-RG
+fi
+
+if [ -z "$STORAGE_ACCT_NAME" ]; then
+    if ! [ -z "$NAMING_PREFIX" ]; then
+        STORAGE_ACCT_NAME=${NAMING_PREFIX}tfacct${RND}
+    else
+        STORAGE_ACCT_NAME=tfstateacct${RND}
+    fi
+fi
+
+if [ -z "$CONTAINER_NAME" ]; then
+    if ! [ -z "$NAMING_PREFIX" ]; then
+        CONTAINER_NAME=${NAMING_PREFIX}-tf-$RND
+    else
+        CONTAINER_NAME=tfcont-$RND
+    fi
+fi
+
+if [ -z "$KEYVAULT_NAME" ]; then
+    echo "KEYVAULT_NAME environment variable or -v <keyvault-name> required"
+    exit 1
+fi
+
+if [ -z "$NAMING_PREFIX" ]; then
+    NAMING_PREFIX="tf"
+fi
+
+if [ -z "$USE_SAS" ]; then
+    USE_SAS=false
+fi
+
+if [ -z "$CREATE_FILE" ]; then
+    CREATE_FILE=false
+fi
+
+echo "The following resources will be created...\n"
+
+echo "TF_RESOURCE_GROUP:    $TF_RESOURCE_GROUP"
+echo "PROJ_RESOURCE_GROUP:  $PROJ_RESOURCE_GROUP"
+echo "STORAGE_ACCT_NAME:    $STORAGE_ACCT_NAME"
+echo "CONTAINER_NAME:       $CONTAINER_NAME"
+echo "CREATE_FILE:          $CREATE_FILE"
+echo "SAS_TOKEN generated:  $USE_SAS"
+echo "KEYVAULT_NAME:        $KEYVAULT_NAME"
+echo "AZURE_DEVOPS_PROJECT: $AZURE_DEVOPS_PROJECT"
+echo "REGION:               $REGION\n"
+
+read -p "Are you sure you want to Proceed [y/N]?"
+if ! [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Maybe next time!"
+    exit 1 
+fi
+
+alias echo="echo -e"
+
+# Create resource group
+az group create --name $TF_RESOURCE_GROUP --location $REGION 1>/dev/null
+
+# Create storage account
+az storage account create --resource-group $TF_RESOURCE_GROUP --name $STORAGE_ACCT_NAME --sku Standard_LRS --encryption-services blob 1>/dev/null
+
+# Get storage account key
+ACCOUNT_KEY=$(az storage account keys list --resource-group $TF_RESOURCE_GROUP --account-name $STORAGE_ACCT_NAME --query [0].value -o tsv)
+
+# Create blob container
+az storage container create --name $CONTAINER_NAME --account-name $STORAGE_ACCT_NAME --account-key $ACCOUNT_KEY 1>/dev/null
+
+if [ $USE_SAS == "true" ]; then
+    END=`date -u -d "1 month" '+%Y-%m-%dT%H:%MZ'`
+    SAS=`az storage container generate-sas --account-key $ACCOUNT_KEY --account-name $STORAGE_ACCT_NAME -n $CONTAINER_NAME --https-only --permissions dlrw --expiry $END -o tsv`
+fi
+echo "storage_account_name: $STORAGE_ACCT_NAME"
+echo "container_name: $CONTAINER_NAME"
+
+# Create Keyvault if it doesn't exist.  This keyvault will hold service principal info
+# for our projects.  
+(
+    set +e
+    KEYVAULT=$(az keyvault show -n $KEYVAULT_NAME -g $TF_RESOURCE_GROUP -o json)
+    if [ $? -ne 0 ]; then
+        KEYVAULT=$(az keyvault create -n $KEYVAULT_NAME -g $TF_RESOURCE_GROUP -o json)
+    fi
+)
+
+###############################
+## Create Project Resources
+###############################
+
+# Create project resource group
+PROJECT_RG=$(az group create --name $PROJ_RESOURCE_GROUP --location $REGION -o json)
+# create cert for service principal
+mkdir cert
+openssl req -nodes -newkey rsa:2048 -keyout cert/service-principal.key -out cert/service-principal.csr -subj "/C=US/ST=Massachusetts/L=Bolton/O=MSFTOSS/OU=CSU/CN=DevOps"
+openssl x509 -signkey "cert/service-principal.key" -in "cert/service-principal.csr" -req -days 750 -out "cert/service-principal.crt"
+openssl pkcs12 -export -out "cert/service-principal.pfx" -inkey "cert/service-principal.key" -in "cert/service-principal.crt" -nodes -passout pass: 
+openssl pkcs12 -out "cert/service-principal.pem" -in "cert/service-principal.pfx" -nodes -passin pass:
+
+RESOURCE_ACCESS='[{"resourceAppId":"797f4846-ba00-4fd7-ba43-dac1f8f63013","resourceAccess":[{"id":"41094075-9dad-400e-a0bd-54e686782033","type":"Scope"}]},{"resourceAppId":"e406a681-f3d4-42a8-90b6-c2b029497af1","resourceAccess":[{"id":"03e0da56-190b-40ad-a80c-ea378c433f7f","type":"Scope"}]},{"resourceAppId":"00000003-0000-0000-c000-000000000000","resourceAccess":[{"id":"37f7f235-527c-4136-accd-4a02d197296e","type":"Scope"},{"id":"14dad69e-099b-42c9-810b-d002981feec1","type":"Scope"},{"id":"e1fe6dd8-ba31-4d61-89e7-88639da4683d","type":"Scope"}]}]'
+
+APPREG_DISPLAY_NAME="terraform-app-$RND"
+
+REDIRECT_URL="https://login.microsoftonline.com/common/oauth2/nativeclient"
+
+# create application registration
+APP_REG=$(az ad app create \
+  --display-name ${APPREG_DISPLAY_NAME} \
+  --password ThisSecretPassw0rd! \
+  --reply-urls $REDIRECT_URL \
+  --required-resource-accesses $RESOURCE_ACCESS \
+  --available-to-other-tenants false \
+  --native-app true \
+  -o json
+)
+
+APP_ID=$(echo $APP_REG | jq -r '.appId')
+echo "Created Appplication Registration... APPID=$APP_ID"
+
+echo "Creating Service Principal"
+SP=$(az ad sp create --id ${APP_ID} -o json)
+echo $SP | jq
+
+TENANT_ID=$(echo $SP | jq -r '.appOwnerTenantId')
+
+SUB_ID=$(az account show -o json --query id -o tsv)
+
+sleep 30  # Give time for things to propagate
+
+echo "Creating role assignment for Storage Blob Data Contributor"
+az role assignment create \
+  --assignee ${APP_ID} \
+  --role "Contributor" \
+  --resource-group $PROJ_RESOURCE_GROUP \
+  -o json | jq
+
+echo "APPID:                $APP_ID"
+echo "TENANTID:             $TENANT_ID"
+echo "SUBSCRIPTIONID:       $SUB_ID"
+echo "APPREG_DISPLAY NAME:  $APPREG_DISPLAY_NAME"
+
+# Add certificate for authentication to service principal
+az ad app credential reset --id $APP_ID --cert '@cert/service-principal.pem'
+
+# Add certificate and access key to keyvault
+#az keyvault certificate import --vault-name $KEYVAULT_NAME -n sp-cert-tf-$RND -f service-principal.pfx
+az keyvault secret set --name sp-cert-tf-$RND  \
+    --vault-name $KEYVAULT_NAME \
+    --file cert/service-principal.pfx \
+    --encoding base64 \
+    --desc "application/x-pkcs12"
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "ak-backend-sa-$RND" --value "$ACCOUNT_KEY"
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "sp-client-id-tf-$RND" --value "$APP_ID"
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "sp-subscription-id-tf-$RND" --value "$SUB_ID" 
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "sp-tenant-id-tf-$RND" --value "$TENANT_ID" 
+
+DATA=$(cat <<-EOF
+data "azurerm_resource_group" "project-rg" {
+    name = "$PROJ_RESOURCE_GROUP"
+}
+EOF
+)
+
+BACKEND=$(cat <<-EOF
+terraform {
+  required_version = ">=0.12.6"
+  backend "azurerm" {
+    storage_account_name    = "$STORAGE_ACCT_NAME"
+    container_name          = "$CONTAINER_NAME"
+    key                     = "terraform.tfstate"
+    access_key              = "$ACCOUNT_KEY"
+  }
+}
+EOF
+)
+
+PROVIDER=$(cat <<-EOF
+provider "azurerm" {
+  version                   = ">=2.0.0"
+  client_id                 = "\${var.clientId}"
+  client_certificate_path   = "../service-principal.pfx"
+  subscription_id           = "\${var.subscriptionId}"
+  tenant_id                 = "\${var.tenantId}"
+  features {} 
+}
+
+EOF
+)
+
+MAIN=$(cat <<-EOF
+locals {
+  # All variables used in this file should be 
+  # added as locals here 
+  prefix                = "\${var.prefix}-${RND}"
+  location              = var.location
+  vault_name            = "\${local.prefix}-vault"
+  
+  # Common tags should go here
+  tags           = {
+    created_by = "Terraform"
+  }
+}
+
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_key_vault" "vault" {
+  name                  = replace(local.vault_name, "-", "")
+  location              = local.location
+  resource_group_name   = data.azurerm_resource_group.project-rg.name
+  sku_name              = "standard"
+  tenant_id             = data.azurerm_client_config.current.tenant_id
+  tags                  = local.tags
+
+
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    key_permissions = [
+      "get","list","create","delete","encrypt","decrypt","unwrapKey","wrapKey"
+    ]
+
+    secret_permissions = [
+      "get","list","set","delete"
+    ]
+
+  }
+
+}
+EOF
+)
+
+VARIABLES=$(cat <<-EOF
+variable "prefix" {
+  type                      = string
+  default                   = "${NAMING_PREFIX}"
+  description               = "A prefix used for all resources"
+}
+
+variable "location" {
+  type                      = string
+  default                   = "eastus"
+  description               = "The Azure Region used"
+}
+
+variable "clientId" {
+  type                      = string
+  description               = "SP client id"
+}
+
+# variable "clientCert" {
+#   type                      = string
+#   description               = "SP client secret"
+# }
+
+variable "subscriptionId" {
+  type                      = string
+  description               = "SP subscription id"
+}
+
+variable "tenantId" {
+  type                      = string
+  description               = "SP tenant id"
+}
+
+EOF
+)
+
+OUTPUTS=$(cat <<-EOF
+output "tags" {
+  value = local.tags
+}
+
+output "location" {
+  value = local.location
+}
+
+output "prefix" {
+  value = local.prefix
+}
+
+output "proj-rg-id" {
+  value = data.azurerm_resource_group.project-rg.id
+}
+EOF
+)
+
+PIPELINE=$(cat <<-EOF
+variables:
+  TF_STORAGE_ACCT_NAME: $STORAGE_ACCT_NAME
+  TF_STORAGE_CONT_NAME: $CONTAINER_NAME 
+  TF_STATE_FILE: terraform.tfstate 
+pool:
+  vmImage: 'ubuntu-latest'
+steps:
+
+#KEY VAULT TASK
+- task: AzureKeyVault@1
+  inputs:
+    azureSubscription: 'TFSTATE-RG-READ-SP-$AZURE_DEVOPS_PROJECT'
+    KeyVaultName: '$KEYVAULT_NAME'
+    SecretsFilter: 'sp-client-id-tf-${RND},sp-cert-tf-${RND},sp-tenant-id-tf-${RND},sp-subscription-id-tf-${RND},ak-backend-sa-$RND'
+  displayName: 'Get key vault secrets as pipeline variables'
+
+# TERRAFORM VERSION
+- script: |
+    terraform version
+  displayName: 'Get Terraform Version'
+
+- script: |
+    echo "\$(sp-cert-tf-${RND})" > service-principal.pfx.b64
+    base64 --decode service-principal.pfx.b64 > service-principal.pfx
+    openssl pkcs12 -in service-principal.pfx -out service-principal.pem -nodes -passin pass:
+    cat service-principal.pem
+    ls -la
+  displayName: 'What is in the cert variable?'
+
+# AZ LOGIN USING TERRAFORM SERVICE PRINCIPAL
+- script: |
+    az login --service-principal -u "\$(sp-client-id-tf-$RND)" -p "service-principal.pem" --tenant "\$(sp-tenant-id-tf-$RND)"
+  displayName: 'Login the az cli'
+
+- script: |
+    cd iac
+    echo '#######Terraform Init########'
+    terraform init -backend-config="storage_account_name=\$(TF_STORAGE_ACCT_NAME)" -backend-config="container_name=\$(TF_STORAGE_CONT_NAME)" -backend-config="access_key=\$(ak-backend-sa-$RND)" -backend-config="key=\$(TF_STATE_FILE)"
+    echo '#######Terraform Plan########'
+    terraform plan -var="clientId=\$(sp-client-id-tf-$RND)" -var="tenantId=\$(sp-tenant-id-tf-$RND)" -var="subscriptionId=\$(sp-subscription-id-tf-$RND)" -out="out.plan"
+    echo '#######Terraform Apply########'
+    terraform apply out.plan
+  displayName: 'Terraform Init, Plan and Apply '
+EOF
+)
+
+echo "backend.tf..."
+echo "$BACKEND"
+
+echo "main.tf..."
+echo "$TF_CONTENT"
+
+echo "variables.tf..."
+echo "$VARIABLES"
+
+echo "outputs.tf..."
+echo "$OUTPUTS"
+
+echo "data.tf..."
+echo "$DATA"
+
+echo "azure-pipelines.yml"
+echo "$PIPELINE"
+
+if [ "$CREATE_FILE" == "true" ]; then
+    mkdir iac
+    echo "$BACKEND" > iac/backend.tf
+    echo "backend.tf created"
+    echo "$MAIN" > iac/main.tf
+    echo "main.tf created"
+    echo "$VARIABLES" > iac/variables.tf
+    echo "variables.tf created"
+    echo "$OUTPUTS" > iac/outputs.tf
+    echo "outputs.tf created"
+    echo "$DATA" > iac/data.tf
+    echo "data.tf created"
+    echo "$PROVIDER" > iac/provider.tf
+    echo "provider.tf created"
+    echo "$PIPELINE" > azure-pipelines.yml
+    echo "azure-pipelines.yml created"
+else
+    echo "Use the previous HCL in your Terraform files"
+fi
+
+# Clear contents if already exists
+echo "" > env.vars
+
+echo "Ensure you set one of the following env vars..."
+if [ $USE_SAS == "true" ]; then
+    echo "export ARM_SAS_TOKEN=\"$SAS\"" >> env.vars
+    echo "ARM_SAS_TOKEN=$SAS"
+fi
+echo "export ARM_ACCESS_KEY=\"$ACCOUNT_KEY\"" >> env.vars
+echo "ARM_ACCESS_KEY=$ACCOUNT_KEY"
+
+echo "Writing SP to env.vars"
+echo "export ARM_CLIENT_ID=\"$APP_ID\"" >> env.vars
+echo "export ARM_CLIENT_CERTIFICATE_PATH=\"cert/service-principal.pfx\"" >> env.vars
+echo "export ARM_SUBSCRIPTION_ID=\"$SUB_ID\"" >> env.vars
+echo "export ARM_TENANT_ID=\"$TENANT_ID\"" >> env.vars
+
+
+
+# Make sure these don't get accidentally added to git
+echo "They have been exported env.vars file"
+echo "env.vars" > .gitignore
+echo "sp.tfvars.json" >> .gitignore
+echo "cert" >> .gitignore
+echo "\nTo export environment variables run 'source env.vars'"
+echo "Then execute 'terraform init'"
+
+echo "But before you do all that... Let's wait so that AD can proprogate"
+sleep 45 
+echo "Hopefully that should do it"
+echo "THE END"
+
