@@ -1,0 +1,118 @@
+#!/bin/bash
+
+# This script bootstraps a Terraform project for Azure DevOps
+# Running this script will create a remote tfstate file in a storage account.
+# It also will create a Project oriented resource group and a service principle.
+# The service principal has Owner for the resource group created and is 
+# stored in a keyvault that can be accessed by Azure DevOps to configure the 
+# Terraform scripts that are generated
+
+shopt -s expand_aliases
+
+echo "Check program requirements..."
+(
+  set +e
+  programs=(az jq git)
+  missing=0
+  for i in ${programs[@]}; do
+      command -v $i 2&> /dev/null
+      if [ $? -eq 0 ]; then
+          echo " * Found $i"
+      else
+          echo " * ERROR: missing $i"
+          missing=1
+      fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+      echo "Missing required commands"
+      exit 1
+  fi
+)
+
+usage() { 
+  echo "`basename $0`"
+  echo "   Usage: " 
+  echo "     [-g <project resource group>] project resource group to delete"
+  echo "     [-d <devops project name>] Remove the DevOps project" 
+  echo "     [-s <sp name>] Service Principal to remove"
+  echo "     [-o <ADO org>] Azure Devops Org is required if using -d"
+  exit 1
+}
+
+if [ $# -eq 0 ]; then
+  echo "Nothing will be deleted"
+  usage
+fi
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+while getopts s:g:d:o: option
+do
+  case "${option}"
+  in
+      g) RESOURCE_GROUP=${OPTARG};;
+      d) DEVOPS=${OPTARG};;
+      o) ADO_ORG=${OPTARG};;
+      s) SP_NAME=${OPTARG};;
+      *) usage;;
+      : ) usage;;
+  esac
+done
+shift "$(($OPTIND -1))"
+
+if ! [ -z "$DEVOPS" ]; then
+  if [ -z "$ADO_ORG" ]; then
+    ADO_ORG="https://dev.azure.com/brmcconn"
+  fi
+fi
+
+echo "The following resources will be deleted...\n"
+
+if ! [ -z "$RESOURCE_GROUP" ]; then
+  echo "RESOURCE_GROUP:       $RESOURCE_GROUP"
+fi
+if ! [ -z "$DEVOPS" ]; then
+  echo "ADO PROJECT:          $DEVOPS"
+fi
+if ! [ -z "$ADO_ORG" ]; then
+  echo "ADO ORG:              $ADO_ORG"
+fi
+if ! [ -z "$SP_NAME" ]; then
+  echo "SP_NAME:              $SP_NAME"
+fi
+
+read -p "Are you sure you want to Proceed [y/N]?"
+if ! [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Maybe next time!"
+    exit 1 
+fi
+
+if ! [ -z "$DEVOPS" ]; then
+  if [ -z "$ADO_ORG" ]; then
+    echo "Delete ADO Project requires -o ADO Org"
+    exit 1
+  fi
+  ADO_ID=$(az devops project show --project $DEVOPS --detect true --org $ADO_ORG --query "id" -o tsv)
+  az devops project delete --id $ADO_ID --detect true --yes
+fi
+
+if ! [ -z "$RESOURCE_GROUP" ]; then
+  KV_NAME=$(az resource list -g $RESOURCE_GROUP --resource-type "Microsoft.KeyVault/vaults" --query "[0].name" -o tsv)
+  az group delete -n $RESOURCE_GROUP --yes
+  # purge KV first if one exists
+  if ! [ -z $KV_NAME ]; then
+    az keyvault purge --name $KV_NAME
+  fi
+fi
+
+
+if ! [ -z "$SP_NAME" ]; then
+  az ad sp delete --id $(az ad sp list --display-name $SP_NAME --query "[].objectId" -o tsv)
+fi
