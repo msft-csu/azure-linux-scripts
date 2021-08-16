@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash  
 
 # This script bootstraps a Terraform project for Azure DevOps
 # Running this script will create a remote tfstate file in a storage account.
@@ -276,7 +276,7 @@ if ! [ -z "$DEVOPS" ]; then
   unset IFS
 fi
 
-echo -e "\nThe following resources will be created...\n"
+echo -e "\nThe following resources will be used or created...\n"
 
 echo "RESOURCE_GROUP:       $RESOURCE_GROUP"
 echo "PREFIX:               $PREFIX"
@@ -419,8 +419,15 @@ trigger:
     - $GIT_BRANCH
 pool:
   vmImage: 'ubuntu-latest'
+parameters:
+- name: DESTROY
+  displayName: 'Destroy infrastructure instead of create?'
+  type: boolean
+  default: false
 extends:
   template: azure-pipelines.tmpl
+  parameters:
+    DESTROY: \${{parameters.DESTROY}}
 EOS
 
 # Get generic pipeline part that is the same for either
@@ -523,12 +530,12 @@ locals {
   }
 }
 resource "azurerm_key_vault" "vault" {
-  name                  = \"\${local.prefix}-\${local.environment}-kv\"
-  location              = local.location
-  resource_group_name   = local.resource_group 
-  sku_name              = \"standard\"
-  tenant_id             = data.azurerm_client_config.current.tenant_id
-  tags                  = local.common_tags 
+  name                      = \"\${local.prefix}-\${local.environment}-kv\"
+  location                  = local.location
+  resource_group_name       = local.resource_group 
+  sku_name                  = \"standard\"
+  tenant_id                 = data.azurerm_client_config.current.tenant_id
+  tags                      = local.common_tags
 
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
@@ -610,24 +617,23 @@ if [ $BICEP == "true" ]; then
   echo "AZ_KEYVAULT_API_VERSION=$AZ_KEYVAULT_API_VERSION"
 
 gets BICEP_STARTER <<'EOS'
-targetScope = 'subscription'
-
-param resourceGroupName string
-
-resource resource_group 'Microsoft.Resources/resourceGroups@$AZ_RESOURCE_API_VERSION' existing = {
-  name: resourceGroupName 
-}
-
+param prefix string
+param environment string
 module vault 'vault.bicep' = {
  name: 'vault-app'
- scope: resource_group
+ params: {
+   prefix: prefix
+   environment: environment 
+ }
 }
 EOS
 
-gets BICEP_KEYVAULT<<'EOS'
+gets BICEP_KEYVAULT <<'EOS'
 param location string = resourceGroup().location
+param prefix string
+param environment string
 
-var keyVaultName = uniqueString(resourceGroup().id)
+var keyVaultName = '\${prefix}-\${environment}-kv'
 
 resource keyVault 'Microsoft.KeyVault/vaults@$AZ_KEYVAULT_API_VERSION' = {
   name: keyVaultName
@@ -701,14 +707,14 @@ EOS
 gets BICEP_PIPE_TMPL <<'EOS'
 - script: |
     set -x
-    az deployment create -f main.bicep --location \$(REGION) --parameters resourceGroupName=\$(RESOURCE_GROUP)
+    az deployment group create -f main.bicep -g \$(RESOURCE_GROUP) --parameters environment='\$(ENVIRONMENT)' prefix='\$(PREFIX)'
   displayName: 'Create Bicep Deploy'
   condition: eq(\${{ parameters.DESTROY }}, false)
 
 - script: |
     # Destroy
     set -x
-    az deployment create -f main.bicep --location \$(REGION) --parameters resourceGroupName=\$(RESOURCE_GROUP)
+    az deployment group create -f main.bicep -g \$(RESOURCE_GROUP) --parameters environment='\$(ENVIRONMENT)' prefix='\$(PREFIX)'
   displayName: 'Destroy Infra'
   condition: \${{ parameters.DESTROY }}
 EOS
@@ -824,6 +830,16 @@ if ! [ -z $DEVOPS ]; then
     --org $ADO_ORG \
     --pipeline-name Terraform-Build-$GIT_BRANCH \
     --allow-override false
+  
+  sleep 5 
+
+  az pipelines variable create \
+    --name PREFIX \
+    --value $PREFIX \
+    --project $ADO_PROJECT \
+    --org $ADO_ORG \
+    --pipeline-name Terraform-Build-$GIT_BRANCH \
+    --allow-override false
 
   sleep 5
 
@@ -851,7 +867,7 @@ echo "  -u $SP_APPID \\"
 echo "  -p $SP_PASSWORD \\"
 echo "  -o $ADO_ORG  \\"
 echo "  -e <name of environment>  \\"
-if [ $ $TERRAFORM ]; then
+if [ $TERRAFORM == "true" ]; then
   echo "  -s $STORAGE_ACCT_NAME  \\"
   echo "  -c $CONTAINER_NAME \\"
 fi
