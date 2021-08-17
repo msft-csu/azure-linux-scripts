@@ -32,7 +32,7 @@ echo "Check program requirements..."
 usage() { 
   echo "`basename $0`"
   echo "   Usage: " 
-  echo "     [-g <project resource group>] project resource group to delete"
+  echo "     [-g <project resource group>] project resource group to delete.  Can be used multiple times"
   echo "     [-d <devops project name>] Remove the DevOps project" 
   echo "     [-s <sp name>] Service Principal to remove"
   echo "     [-o <ADO org>] Azure Devops Org is required if using -d"
@@ -57,7 +57,7 @@ while getopts s:g:d:o: option
 do
   case "${option}"
   in
-      g) RESOURCE_GROUP=${OPTARG};;
+      g) RESOURCE_GROUP+=(${OPTARG});;
       d) DEVOPS=${OPTARG};;
       o) ADO_ORG=${OPTARG};;
       s) SP_NAME=${OPTARG};;
@@ -76,7 +76,7 @@ fi
 echo "The following resources will be deleted...\n"
 
 if ! [ -z "$RESOURCE_GROUP" ]; then
-  echo "RESOURCE_GROUP:       $RESOURCE_GROUP"
+  echo "RESOURCE_GROUP:       ${RESOURCE_GROUP[@]}"
 fi
 if ! [ -z "$DEVOPS" ]; then
   echo "ADO PROJECT:          $DEVOPS"
@@ -104,12 +104,14 @@ if ! [ -z "$DEVOPS" ]; then
 fi
 
 if ! [ -z "$RESOURCE_GROUP" ]; then
-  KV_NAME=$(az resource list -g $RESOURCE_GROUP --resource-type "Microsoft.KeyVault/vaults" --query "[0].name" -o tsv)
-  az group delete -n $RESOURCE_GROUP --yes
-  # purge KV first if one exists
-  if ! [ -z $KV_NAME ]; then
-    az keyvault purge --name $KV_NAME
-  fi
+  for RG in "${RESOURCE_GROUP[@]}"; do
+    KV_NAME=$(az resource list -g $RG --resource-type "Microsoft.KeyVault/vaults" --query "[0].name" -o tsv)
+    az group delete -n $RG --yes
+    # purge KV first if one existed
+    if ! [ -z $KV_NAME ]; then
+      az keyvault purge --name $KV_NAME
+    fi
+  done
 fi
 
 

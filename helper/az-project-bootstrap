@@ -1,4 +1,4 @@
-#!/bin/bash  
+#!/bin/bash -x
 
 # This script bootstraps a Terraform project for Azure DevOps
 # Running this script will create a remote tfstate file in a storage account.
@@ -80,6 +80,7 @@ usage() {
   echo "     [-d <token>] Creates a DevOps project.  Requires a PAT Token with privileges to create projects in org"
   echo "     [-a <ADO project name>] ADO project to inject service principal and pipelines into"
   echo "     [-o <org>] URL of Azure DevOps organization."
+  echo "     [-m <MGMT resource group>] MGMT RG.  This adds a seperate and distinct RG for the keyvault that contains the service principal and any files related to Terraform state"
   echo "     [-P] For Production.  This will be the envrionment used with the 'main' branch in Git.  Otherwise the branch will be env name."
   exit 1
 }
@@ -94,12 +95,13 @@ for arg in "$@"; do
 done
 
 
-while getopts c:-:a:r:g:d:n:o:s:k:p:e:u:P option
+while getopts c:-:m:a:r:g:d:n:o:s:k:p:e:u:P option
 do
   case "${option}"
   in
       a) ADO_PROJECT=${OPTARG};;
       g) RESOURCE_GROUP=${OPTARG};;
+      m) MGMT_RESOURCE_GROUP=${OPTARG};;
       n) PREFIX=${OPTARG};;
       u) SP_APPID=${OPTARG};;
       p) SP_PASSWORD=${OPTARG};;
@@ -143,7 +145,6 @@ fi
 if [ -z $GIT_BRANCH ]; then
   GIT_BRANCH=$LENV_NAME
 fi
-
 
 # See if SP info was passed in or not
 if ! [ -z $SP_APPID ]; then
@@ -199,6 +200,13 @@ fi
 # Set RG name
 if [ -z "$RESOURCE_GROUP" ]; then
   RESOURCE_GROUP=$UPREFIX-$ENV_SHORT-RG
+fi
+
+if [ -z "$MGMT_RESOURCE_GROUP" ]; then
+  if [[ -z $STORAGE_ACCT_NAME && -z $KEYVAULT_NAME ]]; then
+    MGMT_RESOURCE_GROUP=$UPREFIX-MGMT-RG
+    MGMT_REQUIRED=true
+  fi
 fi
 
 if [ $TERRAFORM == "true" ]; then
@@ -278,7 +286,8 @@ fi
 
 echo -e "\nThe following resources will be used or created...\n"
 
-echo "RESOURCE_GROUP:       $RESOURCE_GROUP"
+echo "APP_RESOURCE_GROUP:   $RESOURCE_GROUP"
+echo "MGMT_RESOURCE_GROUP:  $MGMT_RESOURCE_GROUP"
 echo "PREFIX:               $PREFIX"
 echo "ENV_NAME:             $ENV_NAME"
 echo "ENV_SHORT:            $ENV_SHORT"
@@ -313,17 +322,22 @@ if [ -d ".git" ]; then
   fi
 fi
 
-BRANCH_EXISTS=$(git -P branch --list "$LENV_NAME")
+BRANCH_EXISTS=$(git -P branch --list "$GIT_BRANCH")
 # If branch exists already probably should abort
 if ! [ -z $BRANCH_EXISTS ]; then
-  echo "ERROR: Git branch \"$ENV_NAME\" already exists.  Aborting."
+  echo "ERROR: Git branch \"$GIT_BRANCH\" already exists.  Aborting."
   exit 1
 fi
 
 alias echo="echo -e"
 
-# Create resource group or retrieve the existing id
+# Create the project resource group or retrieve the existing id
 RG_ID=$(az group create --name $RESOURCE_GROUP --location $REGION --query id -o tsv)
+# Create the Mgmt RG for storage account and ado SP keyvault if necessary
+
+if [ $MGMT_REQUIRED == "true" ]; then
+  MGMT_ID=$(az group create --name $MGMT_RESOURCE_GROUP --location $REGION --query id -o tsv)
+fi
 
 # Create storage account if required because of Terraform
 if [ $TERRAFORM == "true" ]; then
@@ -332,10 +346,9 @@ if [ $TERRAFORM == "true" ]; then
   SA_ID=$(az storage account show --name $STORAGE_ACCT_NAME --query "id" -o tsv)
   if [ $? -ne 0 ]; then
       echo "Storage Account does not exist.  Continuing and will create it".
-      SA_ID=$(az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCT_NAME --sku Standard_LRS --encryption-services blob --query "id" -o tsv)
+      SA_ID=$(az storage account create --resource-group $MGMT_RESOURCE_GROUP --name $STORAGE_ACCT_NAME --sku Standard_LRS --encryption-services blob --query "id" -o tsv)
   fi
   set -e
-
 
   # Get storage account key
   ACCOUNT_KEY=$(az storage account keys list --account-name $STORAGE_ACCT_NAME --query [0].value -o tsv)
@@ -353,7 +366,7 @@ set +e
 KEYVAULT_ID=$(az keyvault show -n $KEYVAULT_NAME --query "id" -o tsv)
 if [ $? -ne 0 ]; then
     echo "Keyvault does not exist.  Continuing and will create it".
-    KEYVAULT_ID=$(az keyvault create -n $KEYVAULT_NAME -g $RESOURCE_GROUP --query "id" -o tsv)
+    KEYVAULT_ID=$(az keyvault create -n $KEYVAULT_NAME -g $MGMT_RESOURCE_GROUP --query "id" -o tsv)
 fi
 set -e
 
@@ -385,6 +398,10 @@ SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
 #Now that we have a SP let's give it some permissions
 az role assignment create --role Owner --scope $RG_ID --assignee $SP_APPID -o json
+
+if [ $MGMT_REQUIRED == "true" ]; then
+  az role assignment create --role Owner --scope $MGMT_ID --assignee $SP_APPID -o json
+fi
 
 # echo "SP_APPID=$SP_APPID"
 # echo "SP_PASSWORD=$SP_PASSWORD"
@@ -633,7 +650,7 @@ param location string = resourceGroup().location
 param prefix string
 param environment string
 
-var keyVaultName = '\${prefix}-\${environment}-kv'
+var keyVaultName = toLower('\${prefix}-\${environment}-kv')
 
 resource keyVault 'Microsoft.KeyVault/vaults@$AZ_KEYVAULT_API_VERSION' = {
   name: keyVaultName
@@ -862,6 +879,7 @@ if [ $BICEP == "true" ]; then
 fi
 echo "  -r $REGION \\"
 echo "  -a $ADO_PROJECT \\"
+#echo "  -m $MGMT_RESOURCE_GROUP \\"
 echo "  -g <name of new environment resource group> \\"
 echo "  -u $SP_APPID \\"
 echo "  -p $SP_PASSWORD \\"
