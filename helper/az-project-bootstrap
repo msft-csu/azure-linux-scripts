@@ -428,7 +428,10 @@ az keyvault set-policy --name $KEYVAULT_NAME --object-id $SP_OBJID \
   --secret-permissions backup delete get list purge recover restore set \
   --storage-permissions backup delete deletesas get getsas list listsas purge recover regeneratekey restore set setsas update
 
+######################################################
+# This section creates generic ADO pipeline components
 # Get generic pipeline file done
+######################################################
 gets GENERIC_PIPE <<'EOS'
 trigger:
   branches:
@@ -473,7 +476,10 @@ EOS
 printf '%s\n' "$GENERIC_PIPE" > azure-pipelines-$GIT_BRANCH.yml
 printf '%s\n' "$GENERIC_PIPE_TMPL" > azure-pipelines.tmpl
 
-# Terraform only stuff
+######################################################
+# This section creates Terraform files
+# Terraform only stuff.  Reusable in ADO and GitHUB
+######################################################
 if [ $TERRAFORM == "true" ]; then
   # Get the latest release of azurerm provider
   AZURE_RM_LATEST=$(curl --silent "https://api.github.com/repositories/93446042/releases/latest" | 
@@ -575,6 +581,9 @@ resource "azurerm_key_vault" "vault" {
 }
 EOS
 
+####################################################
+# ADO Pipeline for Terraform.
+####################################################
 gets TERRA_PIPE_TMPL <<'EOS'
 #KEY VAULT TASK BECAUSE SA Account KEY is needed by TF
 - task: AzureKeyVault@1
@@ -619,6 +628,9 @@ gets TERRA_PIPE_TMPL <<'EOS'
   condition: \${{ parameters.DESTROY }}
 EOS
 
+##############################################
+# CREATE project files 
+#############################################
   printf '%s\n' "$TERRA_STARTER" > bootstrap.tf 
   printf '%s\n' "$TERRA_PROVIDER" > provider.tf 
   printf '%s\n' "$TERRA_TFVARS" > terraform.tfvars
@@ -626,7 +638,10 @@ EOS
 
 fi
 
-
+##############################################
+# CREATE Bicep files .
+# These are reuable in Github or ADO
+#############################################
 if [ $BICEP == "true" ]; then
   AZ_RESOURCE_API_VERSION=$(az provider show --namespace Microsoft.Resources --query "resourceTypes[?resourceType=='resourceGroups'].apiVersions | [0]" --out tsv | grep -v preview | head -n1)
   AZ_KEYVAULT_API_VERSION=$(az provider show --namespace Microsoft.KeyVault --query "resourceTypes[?resourceType=='vaults'].apiVersions | [0]" --out tsv | grep -v preview | head -n1)
@@ -721,6 +736,9 @@ output keyVaultName string = keyVault.name
 output keyVaultId string = keyVault.id
 EOS
 
+##############################################
+# Create Bicep ADO pipeline
+##############################################
 gets BICEP_PIPE_TMPL <<'EOS'
 - script: |
     set -x
@@ -735,12 +753,18 @@ gets BICEP_PIPE_TMPL <<'EOS'
   displayName: 'Destroy Infra'
   condition: \${{ parameters.DESTROY }}
 EOS
-  
+
+##############################################
+# Create Bicep project files
+##############################################
   printf '%s\n' "$BICEP_STARTER" > main.bicep
   printf '%s\n' "$BICEP_KEYVAULT" > vault.bicep
   printf '%s\n' "$BICEP_PIPE_TMPL" >> azure-pipelines.tmpl
 fi
 
+##############################################
+# Create ADO project, repo and pipelines
+##############################################
 if ! [ -z $DEVOPS ]; then
   if [ -z $ADO_PROJECT ]; then
     ADO_PROJECT="terraform-$PREFIX"
