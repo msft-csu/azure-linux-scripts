@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 # This script bootstraps a Terraform project for Azure DevOps
 # Running this script will create a remote tfstate file in a storage account.
@@ -12,10 +12,18 @@ shopt -s expand_aliases
 
 # Print out something but not the real thing
 mask() {
-  local n=3                    # number of chars to leave
+  local n=${#1}/2              # number characters left intact
   local a="${1:0:${#1}-n}"     # take all but the last n chars
   local b="${1:${#1}-n}"       # take the final n chars 
   printf "%s%s\n" "${a//?/*}" "$b"   # substitute a with asterisks
+}
+
+upper() {
+  echo $1 | tr "[:lower:]" "[:upper:]"
+}
+
+lower() {
+  echo $1 | tr "[:upper:]" "[:lower:]"
 }
 
 # geta and gets are functions for printing out Yaml in Bash less than v4
@@ -68,10 +76,9 @@ echo "Check program requirements..."
 usage() { 
   echo "`basename $0`"
   echo "   Usage: " 
-  echo "     [-g <project resource group>] project resource group to create"
   echo "     [-u <service principal appid>] service principal appid"
   echo "     [-p <service principal password>] service principal password.  Required if using -a"
-  echo "     [-e <environment>] environmental purpose.  Default is 'dev'"
+  echo "     [-e <environment(s)>] environmental purpose.  This option can be used multiple times.  The last -e will be considered 'production' and be linked to the 'main' branch in Git.  Default is 'dev'"
   echo "     [-s <storage account>] storage account to use for Terraform state"
   echo "     [-c <container name>] storage account container to use for Terraform state"
   echo "     [-k <keyvault name>] keyvault to store service principal in"
@@ -81,7 +88,6 @@ usage() {
   echo "     [-a <ADO project name>] ADO project to inject service principal and pipelines into"
   echo "     [-o <org>] URL of Azure DevOps organization."
   echo "     [-m <MGMT resource group>] MGMT RG.  This adds a seperate and distinct RG for the keyvault that contains the service principal and any files related to Terraform state"
-  echo "     [-P] For Production.  This will be the envrionment used with the 'main' branch in Git.  Otherwise the branch will be env name."
   exit 1
 }
 
@@ -105,14 +111,13 @@ do
       n) PREFIX=${OPTARG};;
       u) SP_APPID=${OPTARG};;
       p) SP_PASSWORD=${OPTARG};;
-      e) ENV_NAME=${OPTARG};;
+      e) ENV_NAME+=(${OPTARG});;
       k) KEYVAULT_NAME=${OPTARG};;
       s) STORAGE_ACCT_NAME=${OPTARG};;
       c) CONTAINER_NAME=${OPTARG};;
       r) REGION=${OPTARG};;
       d) DEVOPS=${OPTARG};;
       o) ADO_ORG=${OPTARG};;
-      P) PRODUCTION=true;;
       -) case "${OPTARG}" in
           terraform)
             TERRA_PROJECT=true
@@ -129,22 +134,6 @@ do
   esac
 done
 shift "$(($OPTIND -1))"
-
-# If ENV_NAME is not passed in assume dev
-if [ -z "$ENV_NAME" ]; then
-  ENV_NAME="DEVELOP"
-fi
-
-ENV_SHORT=${ENV_NAME:0:4}
-LENV_NAME=$(echo $ENV_NAME | tr "[:upper:]" "[:lower:]") 
-
-if [ "$PRODUCTION" == "true" ]; then
-  GIT_BRANCH="main"
-fi
-
-if [ -z $GIT_BRANCH ]; then
-  GIT_BRANCH=$LENV_NAME
-fi
 
 # See if SP info was passed in or not
 if ! [ -z $SP_APPID ]; then
@@ -197,10 +186,28 @@ if [ -z "$REGION" ]; then
   fi
 fi
 
-# Set RG name
-if [ -z "$RESOURCE_GROUP" ]; then
-  RESOURCE_GROUP=$UPREFIX-$ENV_SHORT-RG
+# If ENV_NAME is not passed in assume dev
+if [ -z "$ENV_NAME" ]; then
+  ENV_NAME+=("DEVELOP")
 fi
+
+
+for env in "${ENV_NAME[@]}"; do
+  ENV_SHORT+=(${env:0:4})
+  LENV_NAME+=($(echo $env | tr "[:upper:]" "[:lower:]"))
+  GIT_BRANCH+=($(echo $env | tr "[:upper:]" "[:lower:]"))
+  UENV=$(upper ${env:0:4})
+  RESOURCE_GROUP+=($UPREFIX-$UENV-RG)
+done
+
+#Set the last Git branch to main to follow Git standards
+#This will be our "production" branch
+if [ ${#ENV_NAME[@]} -gt 1 ]; then
+  PROD_ENV=${ENV_NAME[@]: -1}
+else
+  PROD_ENV="N/A"
+fi
+GIT_BRANCH[${#GIT_BRANCH[@]} - 1]=main
 
 if [ -z "$MGMT_RESOURCE_GROUP" ]; then
   if [[ -z $STORAGE_ACCT_NAME && -z $KEYVAULT_NAME ]]; then
@@ -284,13 +291,19 @@ if ! [ -z "$DEVOPS" ]; then
   unset IFS
 fi
 
-echo -e "\nThe following resources will be used or created...\n"
+# Mask the DevOps Token, if there is one, for display
+if ! [ -z $DEVOPS ]; then
+  MASK_TOKEN=$(mask $DEVOPS)
+fi
 
-echo "APP_RESOURCE_GROUP:   $RESOURCE_GROUP"
-echo "MGMT_RESOURCE_GROUP:  $MGMT_RESOURCE_GROUP"
+echo -e "\nThe following resources will be used or created...\n"
 echo "PREFIX:               $PREFIX"
-echo "ENV_NAME:             $ENV_NAME"
-echo "ENV_SHORT:            $ENV_SHORT"
+echo "MGMT_RESOURCE_GROUP:  $MGMT_RESOURCE_GROUP"
+echo "PROTECTED ENV:        $PROD_ENV"
+echo "RESOURCE_GROUP(s):    ${RESOURCE_GROUP[@]}"
+echo "GIT_BRANCH(s):        ${GIT_BRANCH[@]}"
+echo "ENV_NAME(s):          ${ENV_NAME[@]}"
+echo "ENV_SHORT(s):         ${ENV_SHORT[@]}"
 echo "SP_NAME:              $SP_NAME"
 echo "KEYVAULT_NAME:        $KEYVAULT_NAME"
 if [ $TERRAFORM == "true" ]; then
@@ -301,8 +314,7 @@ echo "REGION:               $REGION"
 echo "TERRAFORM PROJECT:    $TERRAFORM"
 echo "BICEP PROJECT:        $BICEP"
 echo "ADO_ORG:              $ADO_ORG"
-echo "DEVOPS:               $DEVOPS"
-echo "GIT_BRANCH:           $GIT_BRANCH"
+echo "DEVOPS_TOKEN:         $MASK_TOKEN" 
 echo ""
 echo -e "NOTE: Service Principal $SP_NAME with Owner permissions on $RESOURCE_GROUP will be stored in $KEYVAULT_NAME\n"
 
@@ -314,7 +326,7 @@ fi
 
 if [ -d ".git" ]; then
   echo ""
-  echo "WARNING: Directory already a git repo. There will be changes made to this Git repository! "
+  echo "WARNING: Directory already a git repo. There will be changes made to this Git repository that may have devastating consquencies"
   read -p "Are you sure you want to Proceed [y/N]?"
   if ! [[ "$REPLY" =~ ^[Yy]$ ]]; then
       echo "Maybe next time!"
@@ -322,7 +334,9 @@ if [ -d ".git" ]; then
   fi
 fi
 
+set +e
 BRANCH_EXISTS=$(git -P branch --list "$GIT_BRANCH")
+set -e
 # If branch exists already probably should abort
 if ! [ -z $BRANCH_EXISTS ]; then
   echo "ERROR: Git branch \"$GIT_BRANCH\" already exists.  Aborting."
@@ -330,10 +344,6 @@ if ! [ -z $BRANCH_EXISTS ]; then
 fi
 
 alias echo="echo -e"
-
-# Create the project resource group or retrieve the existing id
-RG_ID=$(az group create --name $RESOURCE_GROUP --location $REGION --query id -o tsv)
-# Create the Mgmt RG for storage account and ado SP keyvault if necessary
 
 if [ $MGMT_REQUIRED == "true" ]; then
   MGMT_ID=$(az group create --name $MGMT_RESOURCE_GROUP --location $REGION --query id -o tsv)
@@ -396,21 +406,25 @@ SP_TENANTID=$(echo $SP_INFO | jq -e -r 'select(.appOwnerTenantId != null) | .app
 SP_OBJID=$(echo $SP_INFO | jq -e -r 'select(.objectId != null) | .objectId')
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
-#Now that we have a SP let's give it some permissions
-az role assignment create --role Owner --scope $RG_ID --assignee $SP_APPID -o json
+# Wait for Progagation via loop
+echo "Sleeping in loop for 5 seconds to propagate SP"
+until az ad sp show --id $SP_APPID &> /dev/null ; do echo "Waiting for Azure AD propagation" && sleep 5; done
 
-if [ $MGMT_REQUIRED == "true" ]; then
-  az role assignment create --role Owner --scope $MGMT_ID --assignee $SP_APPID -o json
-fi
+# Create the project resource group or retrieve the existing id
+for RG in ${RESOURCE_GROUP[@]}; do
+  
+  CRG=$(echo $RG | tr "[:lower:]" "[:upper:]") 
+  RG_ID=$(az group create --name $CRG --location $REGION --query id -o tsv)
+  # Create the Mgmt RG for storage account and ado SP keyvault if necessary
+  #Now that we have a SP let's give it some permissions
+  az role assignment create --role Owner --scope $RG_ID --assignee $SP_APPID -o json
+done
+az role assignment create --role Owner --scope $MGMT_ID --assignee $SP_APPID -o json
 
 # echo "SP_APPID=$SP_APPID"
 # echo "SP_PASSWORD=$SP_PASSWORD"
 # echo "SP_TENANTID=$SP_TENANTID"
 # echo "SUBSCRIPTION_ID=$SUBSCRIPTION_ID"
-
-# Wait for Progagation via loop
-echo "Sleeping in loop for 5 seconds to propagate SP"
-until az ad sp show --id $SP_APPID &> /dev/null ; do echo "Waiting for Azure AD propagation" && sleep 5; done
 
 # Add SP info and access key to keyvault
 if [ $TERRAFORM == 'true' ]; then
@@ -432,11 +446,16 @@ az keyvault set-policy --name $KEYVAULT_NAME --object-id $SP_OBJID \
 # This section creates generic ADO pipeline components
 # Get generic pipeline file done
 ######################################################
+#
+# Loop over each branch to create a pipeline file that listens
+# for changes on that branch only
+#
+for BRANCH in ${GIT_BRANCH[@]}; do
 gets GENERIC_PIPE <<'EOS'
 trigger:
   branches:
     include:
-    - $GIT_BRANCH
+    - ${BRANCH}
 pool:
   vmImage: 'ubuntu-latest'
 parameters:
@@ -449,8 +468,12 @@ extends:
   parameters:
     DESTROY: \${{parameters.DESTROY}}
 EOS
+printf '%s\n' "$GENERIC_PIPE" > azure-pipelines-${BRANCH}.yml
+done
 
-# Get generic pipeline part that is the same for either
+#
+# Get generic pipeline part that is the same for all branches
+#
 gets GENERIC_PIPE_TMPL <<'EOS'
 parameters:
 - name: DESTROY
@@ -473,7 +496,6 @@ steps:
 EOS
 
 # Generic pipeline that is created for either Bicep or Terraform
-printf '%s\n' "$GENERIC_PIPE" > azure-pipelines-$GIT_BRANCH.yml
 printf '%s\n' "$GENERIC_PIPE_TMPL" > azure-pipelines.tmpl
 
 ######################################################
@@ -778,34 +800,30 @@ if ! [ -z $DEVOPS ]; then
   fi
   set -e
   REPO=$(az repos show -r $ADO_PROJECT --project $ADO_PROJECT --query remoteUrl -o tsv)
-  if [ $PRODUCTION == "true" ]; then
+
+  # Initialize current directory as a Git repo 
+  git init
+  for BRANCH in ${GIT_BRANCH[@]}; do
+    git checkout -b $BRANCH; git add *; git commit -m 'initial commit' || true
+  done 
+  git remote add origin $REPO || true
+  git push -u origin --all
+  
+  #Setup service connection in project
+  echo "Setting up SP in ADO Project"
+  export AZURE_DEVOPS_EXT_AZURE_RM_SERVICE_PRINCIPAL_KEY="$SP_PASSWORD"
+  
+  if [ ${#GIT_BRANCH[@]} -gt 1 ]; then
     REPO_ID=$(az repos show -r $ADO_PROJECT --project $ADO_PROJECT --query id -o tsv)
     az repos policy merge-strategy create \
       --blocking true \
-      --branch $GIT_BRANCH \
+      --branch main \
       --enabled true \
       --repository-id $REPO_ID \
       --allow-no-fast-forward true \
       --org $ADO_ORG \
       --project $ADO_PROJECT 
   fi
-  (
-    set +e
-    git init; git checkout -b $GIT_BRANCH; git add *; git commit -m 'initial commit'
-    
-    # Add any other stuff to the other branches too   
-    for branch in $(git for-each-ref refs/heads | cut -d/ -f3- | grep -v $GIT_BRANCH); do
-      git checkout $branch; git merge $GIT_BRANCH
-    done
-
-    # Add the origin but don't worry if the same one is already there
-    git remote add origin $REPO
-    set -e
-  )
-  git push -u origin --all
-  #Setup service connection in project
-  echo "Setting up SP in ADO Project"
-  export AZURE_DEVOPS_EXT_AZURE_RM_SERVICE_PRINCIPAL_KEY="$SP_PASSWORD"
 
   # Get the existing SE in the ADO project named azure-sp if it exists otherwise create it
   SE_ID=$(az devops service-endpoint list -p $ADO_PROJECT --query "[?name=='azure-sp'].id" -o tsv)
@@ -830,90 +848,72 @@ if ! [ -z $DEVOPS ]; then
 
   # Let Azure work everything out related to the service connection
   sleep 15
-  
-  # Create and run the pipeline in ADO
-  az pipelines create \
-    --name "Terraform-Build-$GIT_BRANCH" \
-    --description "Infra Build for $ENV_NAME" \
-    --yml-path azure-pipelines-$GIT_BRANCH.yml \
-    --branch $GIT_BRANCH \
-    --project $ADO_PROJECT \
-    --repository $REPO \
-    --skip-first-run \
-    --org $ADO_ORG
 
-  sleep 5
+  for ((i=0; i < ${#ENV_NAME[@]}; ++i )); do
+    # Create and run the pipeline in ADO
+    az pipelines create \
+      --name "Terraform-Build-${GIT_BRANCH[$i]}" \
+      --description "Infra Build for ${ENV_NAME[$i]}" \
+      --yml-path azure-pipelines-${GIT_BRANCH[$i]}.yml \
+      --branch ${GIT_BRANCH[$i]} \
+      --project $ADO_PROJECT \
+      --repository $REPO \
+      --skip-first-run \
+      --org $ADO_ORG
 
-  az pipelines variable create \
-    --name RESOURCE_GROUP \
-    --value $RESOURCE_GROUP \
-    --project $ADO_PROJECT \
-    --org $ADO_ORG \
-    --pipeline-name Terraform-Build-$GIT_BRANCH \
-    --allow-override false
-  
-  sleep 5
+    sleep 5
 
-  az pipelines variable create \
-    --name ENVIRONMENT \
-    --value $ENV_SHORT \
-    --project $ADO_PROJECT \
-    --org $ADO_ORG \
-    --pipeline-name Terraform-Build-$GIT_BRANCH \
-    --allow-override false
+    az pipelines variable create \
+      --name RESOURCE_GROUP \
+      --value ${RESOURCE_GROUP[$i]} \
+      --project $ADO_PROJECT \
+      --org $ADO_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+    
+    sleep 5
 
-  sleep 5 
+    az pipelines variable create \
+      --name ENVIRONMENT \
+      --value ${ENV_SHORT[$i]} \
+      --project $ADO_PROJECT \
+      --org $ADO_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
 
-  az pipelines variable create \
-    --name REGION \
-    --value $REGION \
-    --project $ADO_PROJECT \
-    --org $ADO_ORG \
-    --pipeline-name Terraform-Build-$GIT_BRANCH \
-    --allow-override false
-  
-  sleep 5 
+    sleep 5 
 
-  az pipelines variable create \
-    --name PREFIX \
-    --value $PREFIX \
-    --project $ADO_PROJECT \
-    --org $ADO_ORG \
-    --pipeline-name Terraform-Build-$GIT_BRANCH \
-    --allow-override false
+    az pipelines variable create \
+      --name REGION \
+      --value $REGION \
+      --project $ADO_PROJECT \
+      --org $ADO_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+    
+    sleep 5 
 
-  sleep 5
+    az pipelines variable create \
+      --name PREFIX \
+      --value $PREFIX \
+      --project $ADO_PROJECT \
+      --org $ADO_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
 
-  az pipelines run \
-    --name Terraform-Build-$GIT_BRANCH \
-    --org $ADO_ORG \
-    --project $ADO_PROJECT 
+    sleep 5
 
+    az pipelines run \
+      --name Terraform-Build-${GIT_BRANCH[$i]} \
+      --org $ADO_ORG \
+      --project $ADO_PROJECT 
+  done
 fi
 
-echo "The $ENV_NAME environment has been created.  To create other environments and pipelines "
-echo "in the same ADO project use the following command:"
+echo "The following environment(s) have been created:"
+echo "${ENV_NAME[@]}"
+echo "and are represented by the following RGs:"
+echo "${RESOURCE_GROUP[@]}"
 echo ""
-echo "az-project-bootstrap \\"
-if [ $TERRAFORM == "true" ]; then
-  echo " --terraform \\"
-fi
-if [ $BICEP == "true" ]; then
-  echo "--bicep \\"
-fi
-echo "  -r $REGION \\"
-echo "  -a $ADO_PROJECT \\"
-#echo "  -m $MGMT_RESOURCE_GROUP \\"
-echo "  -g <name of new environment resource group> \\"
-echo "  -u $SP_APPID \\"
-echo "  -p $SP_PASSWORD \\"
-echo "  -o $ADO_ORG  \\"
-echo "  -e <name of environment>  \\"
-if [ $TERRAFORM == "true" ]; then
-  echo "  -s $STORAGE_ACCT_NAME  \\"
-  echo "  -c $CONTAINER_NAME \\"
-fi
-echo "  -k $KEYVAULT_NAME  \\"
-echo "  -n $PREFIX"
 
 echo "THE END"
