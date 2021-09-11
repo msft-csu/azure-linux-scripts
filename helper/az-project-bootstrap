@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 # This script bootstraps a Terraform project for Azure DevOps
 # Running this script will create a remote tfstate file in a storage account.
@@ -55,7 +55,7 @@ gets() {
 echo "Check program requirements..."
 (
   set +e
-  programs=(az jq git)
+  programs=(az jq git gh)
   missing=0
   for i in ${programs[@]}; do
       command -v $i 2&> /dev/null
@@ -84,9 +84,9 @@ usage() {
   echo "     [-k <keyvault name>] keyvault to store service principal in"
   echo "     [-r <region>] region to use. EastUs or USGovVirginia are defaults"
   echo "     [-n <prefix>] prefix to use for Azure resources.  Must be unique across Azure"
-  echo "     [-d <token>] Creates a DevOps project.  Requires a PAT Token with privileges to create projects in org"
-  echo "     [-a <ADO project name>] ADO project to inject service principal and pipelines into"
-  echo "     [-o <org>] URL of Azure DevOps organization."
+  echo "     [-d <token>] Creates a DevOps project.  Requires a PAT Token with privileges to create projects in org. Can be either for ADO or GITHUB"
+  echo "     [-a <Devops project name>] Devops project to inject service principal and pipelines into"
+  echo "     [-o <org>] URL of Azure DevOps organization or Github Organization name."
   echo "     [-m <MGMT resource group>] MGMT RG.  This adds a seperate and distinct RG for the keyvault that contains the service principal and any files related to Terraform state"
   exit 1
 }
@@ -105,7 +105,7 @@ while getopts c:-:m:a:r:g:d:n:o:s:k:p:e:u:P option
 do
   case "${option}"
   in
-      a) ADO_PROJECT=${OPTARG};;
+      a) DEVOPS_PROJECT=${OPTARG};;
       g) RESOURCE_GROUP=${OPTARG};;
       m) MGMT_RESOURCE_GROUP=${OPTARG};;
       n) PREFIX=${OPTARG};;
@@ -117,13 +117,19 @@ do
       c) CONTAINER_NAME=${OPTARG};;
       r) REGION=${OPTARG};;
       d) DEVOPS=${OPTARG};;
-      o) ADO_ORG=${OPTARG};;
+      o) DEVOPS_ORG=${OPTARG};;
       -) case "${OPTARG}" in
           terraform)
             TERRA_PROJECT=true
             ;;
           bicep)
             BICEP_PROJECT=true
+            ;;
+          github)
+            GITHUB=true
+            ;;
+          ado)
+            ADO=true
             ;;
           *)
             usage
@@ -135,14 +141,20 @@ do
 done
 shift "$(($OPTIND -1))"
 
+# TODO: Support other subscriptions
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
 # See if SP info was passed in or not
 if ! [ -z $SP_APPID ]; then
-  SP_INFO=$(az ad sp show --id $SP_APPID -o json)
+  SP_INFO=$(az ad sp show --id $SP_APPID --query '{clientId:appId, displayName:displayName, tenantId:appOwnerTenantId, objectId:objectId}' -o json)
   SP_NAME=$(echo $SP_INFO | jq -e -r 'select(.displayName != null) | .displayName')
   if [ -z $SP_PASSWORD ]; then
     echo "Password required when using -a"
     exit 1
   fi
+  SP_INFO=$(echo $SP_INFO | jq -r --arg SECRET "$SP_PASSWORD" '. + {"clientSecret": $SECRET}')
+  echo $SP_INFO
+  # At this point the passed in info should be formatted similar to create-for-rbac --sdk required by GH
 fi
 
 #Get a Random number that gets used for uniqueness
@@ -248,15 +260,25 @@ fi
 
 
 if [ -z "$DEVOPS" ]; then
-  DEVOPS=$DEVOPS_PAT
+  if [ "$GITHUB" == true ]; then
+    DEVOPS_ORG=$GITHUB_ORG
+    DEVOPS=$GITHUB_TOKEN
+  fi
+  
+  if [ "$ADO" == true ]; then
+    DEVOPS_ORG=$ADO_ORG
+    DEVOPS=$DEVOPS_PAT
+  fi
+  
   if [ -z "$DEVOPS" ]; then
-    echo "ERROR: Must supply a PAT Token from Azure DevOps.  This can be"
-    echo "done either on the command line with -d or via env with DEVOPS_PAT" 
+    echo "ERROR: Must supply a Token for Azure DevOps or GitHub.  This can be"
+    echo "done either on the command line with -d or via env with DEVOPS_PAT or GITHUB_TOKEN" 
     exit 1
   fi
+
   # Set default org
-  if [ -z "$ADO_ORG" ]; then
-    echo "ERROR: Must set ADO_ORG using -a or have ADO_ORG environment variable"
+  if [ -z "$DEVOPS_ORG" ]; then
+    echo "ERROR: Must set DEVOPS_ORG using -a or have DEVOPS_ORG environment variable"
     exit 1
   fi
 fi
@@ -296,6 +318,15 @@ if ! [ -z $DEVOPS ]; then
   MASK_TOKEN=$(mask $DEVOPS)
 fi
 
+if [ "$GITHUB" == "true" ]; then
+  DEVOPS_TARGET="GITHUB"
+fi
+
+if [ "$ADO" == "true" ]; then
+  DEVOPS_TARGET="ADO"
+fi
+
+
 echo -e "\nThe following resources will be used or created...\n"
 echo "PREFIX:               $PREFIX"
 echo "MGMT_RESOURCE_GROUP:  $MGMT_RESOURCE_GROUP"
@@ -313,7 +344,8 @@ fi
 echo "REGION:               $REGION"
 echo "TERRAFORM PROJECT:    $TERRAFORM"
 echo "BICEP PROJECT:        $BICEP"
-echo "ADO_ORG:              $ADO_ORG"
+echo "DEVOPS_ORG:           $DEVOPS_ORG"
+echo "DEVOPS_TARGET:        $DEVOPS_TARGET"
 echo "DEVOPS_TOKEN:         $MASK_TOKEN" 
 echo ""
 echo -e "NOTE: Service Principal $SP_NAME with Owner permissions on $RESOURCE_GROUP will be stored in $KEYVAULT_NAME\n"
@@ -391,20 +423,19 @@ fi
 
 # Create Service Principal
 echo "Create or retrieve Service Principal"
-if [ -z $SP_APPID ]; then
+if [ -z $SP_INFO ]; then
   echo "Looking up SP"
-  SP_INFO=$(az ad sp create-for-rbac -n $SP_NAME --skip-assignment -o json)
-  SP_PASSWORD=$(echo $SP_INFO | jq -e -r 'select(.password != null) | .password')
+  SP_INFO=$(az ad sp create-for-rbac --sdk -n $SP_NAME --skip-assignment -o json)
+  SP_APPID=$(echo $SP_INFO | jq -e -r 'select(.clientId != null) | .clientId')
+  SP_PASSWORD=$(echo $SP_INFO | jq -e -r 'select(.clientSecret != null) | .clientSecret')
+  SP_OBJID=$(az ad sp show --id $SP_APPID --query objectId -o tsv)
+  SP_INFO=$(echo $SP_INFO | jq -r --arg OBJECTID $SP_OBJID '. + { "objectId": $OBJECTID }')
 fi
 
-# Grab info from the Service Principal
-SP_APPID=$(echo $SP_INFO | jq -e -r 'select(.appId != null) | .appId')
-
-# Reset SP_INFO so we are dealing with the same json whether it was passed in or not
-SP_INFO=$(az ad sp show --id $SP_APPID)
-SP_TENANTID=$(echo $SP_INFO | jq -e -r 'select(.appOwnerTenantId != null) | .appOwnerTenantId')
+# Grab info from the Service Principal.  Should be the same whether just created or passed in
+SP_APPID=$(echo $SP_INFO | jq -e -r 'select(.clientId != null) | .clientId')
+SP_TENANTID=$(echo $SP_INFO | jq -e -r 'select(.tenantId != null) | .tenantId')
 SP_OBJID=$(echo $SP_INFO | jq -e -r 'select(.objectId != null) | .objectId')
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
 # Wait for Progagation via loop
 echo "Sleeping in loop for 5 seconds to propagate SP"
@@ -442,6 +473,207 @@ az keyvault set-policy --name $KEYVAULT_NAME --object-id $SP_OBJID \
   --secret-permissions backup delete get list purge recover restore set \
   --storage-permissions backup delete deletesas get getsas list listsas purge recover regeneratekey restore set setsas update
 
+
+checkDevOpsInput() {
+  if [ -z $DEVOPS_TARGET ]; then
+    echo "Error: Must pass in the type of login... ADO or GITHUB"
+    exit 1
+  fi
+}
+
+devOpsLogin() {
+  checkDevOpsInput
+  if [ "$DEVOPS_TARGET" == "ADO" ]; then
+    echo $DEVOPS | az devops login --organization $DEVOPS_ORG
+    #Setup service connection in project
+    echo "Setting up SP in ADO Project"
+    export AZURE_DEVOPS_EXT_AZURE_RM_SERVICE_PRINCIPAL_KEY="$SP_PASSWORD"
+  elif [ "$DEVOPS_TARGET" == "GITHUB" ]; then
+    # TODO: Add hostname login for GH Enterprise
+    unset GITHUB_TOKEN
+    echo "DEVOPS_TOKEN=$DEVOPS"
+    echo $DEVOPS | gh auth login --with-token
+  else  
+    echo "ERROR: Shouldn't be here.  Took a wrong turn somewhere"
+    exit 1
+  fi
+}
+
+getExistingProject() {
+  checkDevOpsInput
+  if [ "$DEVOPS_TARGET" == "ADO" ]; then
+    DEVOPS_PROJECT_ID=$(az devops project show -p $DEVOPS_PROJECT --query 'id' -o tsv)
+  else 
+    # Disable the use of less for paging
+    gh config set pager cat 
+    DEVOPS_PROJECT_ID=$(gh repo view $DEVOPS_PROJECT --json 'id' --jq '.[]')
+  fi
+
+}
+
+createDevOpsProject() {
+  checkDevOpsInput
+  if [ "$DEVOPS_TARGET" == "ADO" ]; then
+    DEVOPS_PROJECT_ID=$(az devops project create --name $DEVOPS_PROJECT --org $DEVOPS_ORG --query "id" -o tsv)
+  else
+    gh repo create $DEVOPS_ORG/$DEVOPS_PROJECT --private -y
+    cd $DEVOPS_PROJECT
+    DEVOPS_PROJECT_ID=$(gh repo view $DEVOPS_PROJECT --json 'id' --jq '.[]')
+  fi
+  echo "DEVOPS_PROJECT_ID=$DEVOPS_PROEJCT_ID"
+}
+
+getRepoURL() {
+  checkDevOpsInput
+  if [ "$DEVOPS_TARGET" == "ADO" ]; then
+    REPO=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query remoteUrl -o tsv)
+  else
+    REPO=$(gh repo view $DEVOPS_PROJECT --json 'url' --jq '.[]')
+  fi
+  echo "REPO=$REPO"
+}
+
+addTokenToURL() {
+  if [ -z $REPO ]; then
+    echo "ERROR:  Repo is empty"
+    exit 1
+  fi
+  if [ -z $DEVOPS ]; then
+    echo "ERROR:  Token not found"
+    exit 1
+  fi
+  GIT_URL=$(sed -e "s^//^//$DEVOPS@^" <<<$REPO)
+}
+
+##############################################
+# Create ADO project, repo and pipelines
+##############################################
+if ! [ -z $DEVOPS ]; then
+  if [ -z $DEVOPS_PROJECT ]; then
+    DEVOPS_PROJECT="bootstrap-$PREFIX"
+  fi
+  # Call function to Login to correct platform
+  devOpsLogin
+
+  # See if project already exists and don't stop if there is an error
+  set +e 
+  getExistingProject
+
+  # Create if it doesn't exist
+  if [ -z $DEVOPS_PROJECT_ID ]; then
+    echo "DEVOPS Project does not exist.  Continuing and will create it".
+    createDevOpsProject  
+  fi
+  set -e
+
+  if [ "$DEVOPS_TARGET" == "ADO" ]; then
+    # Put a policy on ADO repos committing to main
+    # Not currently available in GitHub free repos
+    if [ ${#GIT_BRANCH[@]} -gt 1 ]; then
+      REPO_ID=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query id -o tsv)
+      az repos policy merge-strategy create \
+        --blocking true \
+        --branch main \
+        --enabled true \
+        --repository-id $REPO_ID \
+        --allow-no-fast-forward true \
+        --org $DEVOPS_ORG \
+        --project $DEVOPS_PROJECT 
+    fi
+    # Get the existing SE in the ADO project named azure-sp if it exists otherwise create it
+    SE_ID=$(az devops service-endpoint list -p $DEVOPS_PROJECT --query "[?name=='azure-sp'].id" -o tsv)
+    if [ -z $SE_ID ]; then
+      SE_ID=$(az devops service-endpoint azurerm create \
+        --name azure-sp \
+        --azure-rm-tenant-id $SP_TENANTID  \
+        --azure-rm-subscription-id $SUBSCRIPTION_ID \
+        --azure-rm-subscription-name internal \
+        --azure-rm-service-principal-id $SP_APPID \
+        --project $DEVOPS_PROJECT --query "id" -o tsv)
+    fi
+    echo "SE_ID=$SE_ID"
+
+    sleep 15  
+
+    # Allow pipelines to use this SP
+    az devops service-endpoint update \
+      --project $DEVOPS_PROJECT \
+      --id $SE_ID \
+      --enable-for-all true
+
+    # Let Azure work everything out related to the service connection
+    sleep 15
+
+    for ((i=0; i < ${#ENV_NAME[@]}; ++i )); do
+      # Create and run the pipeline in ADO
+      az pipelines create \
+        --name "Terraform-Build-${GIT_BRANCH[$i]}" \
+        --description "Infra Build for ${ENV_NAME[$i]}" \
+        --yml-path azure-pipelines-${GIT_BRANCH[$i]}.yml \
+        --branch ${GIT_BRANCH[$i]} \
+        --project $DEVOPS_PROJECT \
+        --repository $REPO \
+        --skip-first-run \
+        --org $DEVOPS_ORG
+
+      sleep 5
+
+      az pipelines variable create \
+        --name RESOURCE_GROUP \
+        --value ${RESOURCE_GROUP[$i]} \
+        --project $DEVOPS_PROJECT \
+        --org $DEVOPS_ORG \
+        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+        --allow-override false
+      
+      sleep 5
+
+      az pipelines variable create \
+        --name ENVIRONMENT \
+        --value ${ENV_SHORT[$i]} \
+        --project $DEVOPS_PROJECT \
+        --org $DEVOPS_ORG \
+        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+        --allow-override false
+
+      sleep 5 
+
+      az pipelines variable create \
+        --name REGION \
+        --value $REGION \
+        --project $DEVOPS_PROJECT \
+        --org $DEVOPS_ORG \
+        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+        --allow-override false
+      
+      sleep 5 
+
+      az pipelines variable create \
+        --name PREFIX \
+        --value $PREFIX \
+        --project $DEVOPS_PROJECT \
+        --org $DEVOPS_ORG \
+        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+        --allow-override false
+
+      sleep 5
+
+      az pipelines run \
+        --name Terraform-Build-${GIT_BRANCH[$i]} \
+        --org $DEVOPS_ORG \
+        --project $DEVOPS_PROJECT 
+    done
+  elif [ $DEVOPS_TARGET == "GITHUB" ]; then
+    # Add SP_INFO as credential in GH
+    gh secret set AZURE_CREDENTIALS -b"$SP_INFO"
+
+  else
+    echo "ERROR: Something amiss" 
+    exit 1
+  fi
+
+fi
+
 ######################################################
 # This section creates generic ADO pipeline components
 # Get generic pipeline file done
@@ -450,12 +682,13 @@ az keyvault set-policy --name $KEYVAULT_NAME --object-id $SP_OBJID \
 # Loop over each branch to create a pipeline file that listens
 # for changes on that branch only
 #
-for BRANCH in ${GIT_BRANCH[@]}; do
-gets GENERIC_PIPE <<'EOS'
+for ((i=0; i < ${#GIT_BRANCH[@]}; ++i )); do
+#for BRANCH in ${GIT_BRANCH[@]}; do
+gets ADO_PIPE <<'EOS'
 trigger:
   branches:
     include:
-    - ${BRANCH}
+    - ${GIT_BRANCH[$i]}
 pool:
   vmImage: 'ubuntu-latest'
 parameters:
@@ -468,7 +701,46 @@ extends:
   parameters:
     DESTROY: \${{parameters.DESTROY}}
 EOS
-printf '%s\n' "$GENERIC_PIPE" > azure-pipelines-${BRANCH}.yml
+
+gets GITHUB_WORKFLOW <<'EOS'
+name: IAC
+env:
+  ENVIRONMENT: \"${ENV_NAME[$i]}\"
+  RESOURCE_GROUP: \"${RESOURCE_GROUP[$i]}\"
+on:
+  push:
+    branches: [ '${GIT_BRANCH[$i]}' ]
+  pull_request:
+    branches: [ '${GIT_BRANCH[$i]}' ]
+jobs:
+  iac:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+    - uses: Azure/login@v1
+      with:
+        creds: \${{ secrets.AZURE_CREDENTIALS }}
+    - uses: Azure/get-keyvault-secrets@v1
+      with:
+        keyvault: \"$KEYVAULT_NAME\"
+        secrets: 'SA-ACCESS-KEY,SP-CLIENTID,SP-SUBSCRIPTIONID,SP-TENANTID,SP-PASSWORD'
+      id: GetAccessInfo
+    - uses: actions/checkout@v2
+    - name: 'Terraform Build'
+      run: |
+        export ARM_CLIENT_ID=\"\${{ steps.GetAccessInfo.outputs.SP-CLIENTID }}\"
+        export ARM_ACCESS_KEY=\"\${{ steps.GetAccessInfo.outputs.SA-ACCESS-KEY }}\"
+        export ARM_SUBSCRIPTION_ID=\"\${{ steps.GetAccessInfo.outputs.SP-SUBSCRIPTIONID }}\"
+        export ARM_TENANT_ID=\"\${{ steps.GetAccessInfo.outputs.SP-TENANTID }}\"
+        export ARM_CLIENT_SECRET=\"\${{ steps.GetAccessInfo.outputs.SP-PASSWORD }}\" 
+        terraform init
+        terraform plan -out=out.plan -var-file=terraform.tfvars -var=\"resource_group=\$RESOURCE_GROUP\" -var=\"environment=i\$ENVIRONMENT\"
+        terraform apply out.plan  
+EOS
+mkdir -p .github/workflows
+printf '%s\n' "$GITHUB_WORKFLOW" > .github/workflows/workflow-${GIT_BRANCH[$i]}.yml
+printf '%s\n' "$ADO_PIPE" > azure-pipelines-${GIT_BRANCH[$i]}.yml
 done
 
 #
@@ -782,138 +1054,34 @@ EOS
   printf '%s\n' "$BICEP_STARTER" > main.bicep
   printf '%s\n' "$BICEP_KEYVAULT" > vault.bicep
   printf '%s\n' "$BICEP_PIPE_TMPL" >> azure-pipelines.tmpl
+
 fi
 
-##############################################
-# Create ADO project, repo and pipelines
-##############################################
-if ! [ -z $DEVOPS ]; then
-  if [ -z $ADO_PROJECT ]; then
-    ADO_PROJECT="terraform-$PREFIX"
-  fi
-  echo $DEVOPS | az devops login --organization $ADO_ORG
-  set +e
-  ADO_PROJECT_ID=$(az devops project show -p $ADO_PROJECT --query 'id' -o tsv)
-  if [ $? -ne 0 ]; then
-      echo "ADO Project does not exist.  Continuing and will create it".
-      ADO_PROJECT_ID=$(az devops project create --name $ADO_PROJECT --org $ADO_ORG --query "id" -o tsv)
-  fi
-  set -e
-  REPO=$(az repos show -r $ADO_PROJECT --project $ADO_PROJECT --query remoteUrl -o tsv)
+# Initialize current directory as a Git repo 
+git init
+for BRANCH in ${GIT_BRANCH[@]}; do
+  git checkout -b $BRANCH; git add .github *; git commit -m 'initial commit' || true
+done 
 
-  # Initialize current directory as a Git repo 
-  git init
-  for BRANCH in ${GIT_BRANCH[@]}; do
-    git checkout -b $BRANCH; git add *; git commit -m 'initial commit' || true
-  done 
-  git remote add origin $REPO || true
-  git push -u origin --all
-  
-  #Setup service connection in project
-  echo "Setting up SP in ADO Project"
-  export AZURE_DEVOPS_EXT_AZURE_RM_SERVICE_PRINCIPAL_KEY="$SP_PASSWORD"
-  
-  if [ ${#GIT_BRANCH[@]} -gt 1 ]; then
-    REPO_ID=$(az repos show -r $ADO_PROJECT --project $ADO_PROJECT --query id -o tsv)
-    az repos policy merge-strategy create \
-      --blocking true \
-      --branch main \
-      --enabled true \
-      --repository-id $REPO_ID \
-      --allow-no-fast-forward true \
-      --org $ADO_ORG \
-      --project $ADO_PROJECT 
-  fi
+# Get Repo URL
+getRepoURL
 
-  # Get the existing SE in the ADO project named azure-sp if it exists otherwise create it
-  SE_ID=$(az devops service-endpoint list -p $ADO_PROJECT --query "[?name=='azure-sp'].id" -o tsv)
-  if [ -z $SE_ID ]; then
-    SE_ID=$(az devops service-endpoint azurerm create \
-      --name azure-sp \
-      --azure-rm-tenant-id $SP_TENANTID  \
-      --azure-rm-subscription-id $SUBSCRIPTION_ID \
-      --azure-rm-subscription-name internal \
-      --azure-rm-service-principal-id $SP_APPID \
-      --project $ADO_PROJECT --query "id" -o tsv)
-  fi
-  echo "SE_ID=$SE_ID"
-
-  sleep 15  
-
-  # Allow pipelines to use this SP
-  az devops service-endpoint update \
-    --project $ADO_PROJECT \
-    --id $SE_ID \
-    --enable-for-all true
-
-  # Let Azure work everything out related to the service connection
-  sleep 15
-
-  for ((i=0; i < ${#ENV_NAME[@]}; ++i )); do
-    # Create and run the pipeline in ADO
-    az pipelines create \
-      --name "Terraform-Build-${GIT_BRANCH[$i]}" \
-      --description "Infra Build for ${ENV_NAME[$i]}" \
-      --yml-path azure-pipelines-${GIT_BRANCH[$i]}.yml \
-      --branch ${GIT_BRANCH[$i]} \
-      --project $ADO_PROJECT \
-      --repository $REPO \
-      --skip-first-run \
-      --org $ADO_ORG
-
-    sleep 5
-
-    az pipelines variable create \
-      --name RESOURCE_GROUP \
-      --value ${RESOURCE_GROUP[$i]} \
-      --project $ADO_PROJECT \
-      --org $ADO_ORG \
-      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-      --allow-override false
-    
-    sleep 5
-
-    az pipelines variable create \
-      --name ENVIRONMENT \
-      --value ${ENV_SHORT[$i]} \
-      --project $ADO_PROJECT \
-      --org $ADO_ORG \
-      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-      --allow-override false
-
-    sleep 5 
-
-    az pipelines variable create \
-      --name REGION \
-      --value $REGION \
-      --project $ADO_PROJECT \
-      --org $ADO_ORG \
-      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-      --allow-override false
-    
-    sleep 5 
-
-    az pipelines variable create \
-      --name PREFIX \
-      --value $PREFIX \
-      --project $ADO_PROJECT \
-      --org $ADO_ORG \
-      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-      --allow-override false
-
-    sleep 5
-
-    az pipelines run \
-      --name Terraform-Build-${GIT_BRANCH[$i]} \
-      --org $ADO_ORG \
-      --project $ADO_PROJECT 
-  done
+# Let's add the DEVOPS token to the url for pushing
+# This will setup the GIT_URL variable
+addTokenToURL
+echo "GIT_URL=$GIT_URL"
+if [ -z $GIT_URL ]; then
+  echo "ERROR: Failed to create a valid GIT_URL"
+  exit 1
 fi
+
+git remote add origin $REPO || true
+git push $GIT_URL --all
 
 echo "The following environment(s) have been created:"
 echo "${ENV_NAME[@]}"
 echo "and are represented by the following RGs:"
 echo "${RESOURCE_GROUP[@]}"
 echo ""
-
+echo $SP_INFO
 echo "THE END"
