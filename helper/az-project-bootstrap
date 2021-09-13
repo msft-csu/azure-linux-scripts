@@ -526,7 +526,7 @@ createDevOpsProject() {
 getRepoURL() {
   checkDevOpsInput
   if [ "$DEVOPS_TARGET" == "ADO" ]; then
-    REPO=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query remoteUrl -o tsv)
+    REPO=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query webUrl -o tsv)
   else
     REPO=$(gh repo view $DEVOPS_PROJECT --json 'url' --jq '.[]')
   fi
@@ -566,111 +566,6 @@ if ! [ -z $DEVOPS ]; then
   fi
   set -e
 
-  if [ "$DEVOPS_TARGET" == "ADO" ]; then
-    # Put a policy on ADO repos committing to main
-    # Not currently available in GitHub free repos
-    if [ ${#GIT_BRANCH[@]} -gt 1 ]; then
-      REPO_ID=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query id -o tsv)
-      az repos policy merge-strategy create \
-        --blocking true \
-        --branch main \
-        --enabled true \
-        --repository-id $REPO_ID \
-        --allow-no-fast-forward true \
-        --org $DEVOPS_ORG \
-        --project $DEVOPS_PROJECT 
-    fi
-    # Get the existing SE in the ADO project named azure-sp if it exists otherwise create it
-    SE_ID=$(az devops service-endpoint list -p $DEVOPS_PROJECT --query "[?name=='azure-sp'].id" -o tsv)
-    if [ -z $SE_ID ]; then
-      SE_ID=$(az devops service-endpoint azurerm create \
-        --name azure-sp \
-        --azure-rm-tenant-id $SP_TENANTID  \
-        --azure-rm-subscription-id $SUBSCRIPTION_ID \
-        --azure-rm-subscription-name internal \
-        --azure-rm-service-principal-id $SP_APPID \
-        --project $DEVOPS_PROJECT --query "id" -o tsv)
-    fi
-    echo "SE_ID=$SE_ID"
-
-    sleep 15  
-
-    # Allow pipelines to use this SP
-    az devops service-endpoint update \
-      --project $DEVOPS_PROJECT \
-      --id $SE_ID \
-      --enable-for-all true
-
-    # Let Azure work everything out related to the service connection
-    sleep 15
-
-    for ((i=0; i < ${#ENV_NAME[@]}; ++i )); do
-      # Create and run the pipeline in ADO
-      az pipelines create \
-        --name "Terraform-Build-${GIT_BRANCH[$i]}" \
-        --description "Infra Build for ${ENV_NAME[$i]}" \
-        --yml-path azure-pipelines-${GIT_BRANCH[$i]}.yml \
-        --branch ${GIT_BRANCH[$i]} \
-        --project $DEVOPS_PROJECT \
-        --repository $REPO \
-        --skip-first-run \
-        --org $DEVOPS_ORG
-
-      sleep 5
-
-      az pipelines variable create \
-        --name RESOURCE_GROUP \
-        --value ${RESOURCE_GROUP[$i]} \
-        --project $DEVOPS_PROJECT \
-        --org $DEVOPS_ORG \
-        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-        --allow-override false
-      
-      sleep 5
-
-      az pipelines variable create \
-        --name ENVIRONMENT \
-        --value ${ENV_SHORT[$i]} \
-        --project $DEVOPS_PROJECT \
-        --org $DEVOPS_ORG \
-        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-        --allow-override false
-
-      sleep 5 
-
-      az pipelines variable create \
-        --name REGION \
-        --value $REGION \
-        --project $DEVOPS_PROJECT \
-        --org $DEVOPS_ORG \
-        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-        --allow-override false
-      
-      sleep 5 
-
-      az pipelines variable create \
-        --name PREFIX \
-        --value $PREFIX \
-        --project $DEVOPS_PROJECT \
-        --org $DEVOPS_ORG \
-        --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
-        --allow-override false
-
-      sleep 5
-
-      az pipelines run \
-        --name Terraform-Build-${GIT_BRANCH[$i]} \
-        --org $DEVOPS_ORG \
-        --project $DEVOPS_PROJECT 
-    done
-  elif [ $DEVOPS_TARGET == "GITHUB" ]; then
-    # Add SP_INFO as credential in GH
-    gh secret set AZURE_CREDENTIALS -b"$SP_INFO"
-
-  else
-    echo "ERROR: Something amiss" 
-    exit 1
-  fi
 
 fi
 
@@ -1077,6 +972,113 @@ fi
 
 git remote add origin $REPO || true
 git push $GIT_URL --all
+  
+if [ "$DEVOPS_TARGET" == "ADO" ]; then
+  # Put a policy on ADO repos committing to main
+  # Not currently available in GitHub free repos
+  if [ ${#GIT_BRANCH[@]} -gt 1 ]; then
+    REPO_ID=$(az repos show -r $DEVOPS_PROJECT --project $DEVOPS_PROJECT --query id -o tsv)
+    az repos policy merge-strategy create \
+      --blocking true \
+      --branch main \
+      --enabled true \
+      --repository-id $REPO_ID \
+      --allow-no-fast-forward true \
+      --org $DEVOPS_ORG \
+      --project $DEVOPS_PROJECT 
+  fi
+  # Get the existing SE in the ADO project named azure-sp if it exists otherwise create it
+  SE_ID=$(az devops service-endpoint list -p $DEVOPS_PROJECT --query "[?name=='azure-sp'].id" -o tsv)
+  if [ -z $SE_ID ]; then
+    SE_ID=$(az devops service-endpoint azurerm create \
+      --name azure-sp \
+      --azure-rm-tenant-id $SP_TENANTID  \
+      --azure-rm-subscription-id $SUBSCRIPTION_ID \
+      --azure-rm-subscription-name internal \
+      --azure-rm-service-principal-id $SP_APPID \
+      --project $DEVOPS_PROJECT --query "id" -o tsv)
+  fi
+  echo "SE_ID=$SE_ID"
+
+  sleep 15  
+
+  # Allow pipelines to use this SP
+  az devops service-endpoint update \
+    --project $DEVOPS_PROJECT \
+    --id $SE_ID \
+    --enable-for-all true
+
+  # Let Azure work everything out related to the service connection
+  sleep 15
+
+  for ((i=0; i < ${#ENV_NAME[@]}; ++i )); do
+    # Create and run the pipeline in ADO
+    az pipelines create \
+      --name "Terraform-Build-${GIT_BRANCH[$i]}" \
+      --description "Infra Build for ${ENV_NAME[$i]}" \
+      --yml-path azure-pipelines-${GIT_BRANCH[$i]}.yml \
+      --branch ${GIT_BRANCH[$i]} \
+      --project $DEVOPS_PROJECT \
+      --repository $DEVOPS_PROJECT \
+      --repository-type tfsgit \
+      --skip-first-run \
+      --org $DEVOPS_ORG
+
+    sleep 5
+
+    az pipelines variable create \
+      --name RESOURCE_GROUP \
+      --value ${RESOURCE_GROUP[$i]} \
+      --project $DEVOPS_PROJECT \
+      --org $DEVOPS_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+    
+    sleep 5
+
+    az pipelines variable create \
+      --name ENVIRONMENT \
+      --value ${ENV_SHORT[$i]} \
+      --project $DEVOPS_PROJECT \
+      --org $DEVOPS_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+
+    sleep 5 
+
+    az pipelines variable create \
+      --name REGION \
+      --value $REGION \
+      --project $DEVOPS_PROJECT \
+      --org $DEVOPS_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+    
+    sleep 5 
+
+    az pipelines variable create \
+      --name PREFIX \
+      --value $PREFIX \
+      --project $DEVOPS_PROJECT \
+      --org $DEVOPS_ORG \
+      --pipeline-name Terraform-Build-${GIT_BRANCH[$i]} \
+      --allow-override false
+
+    sleep 5
+
+    az pipelines run \
+      --name Terraform-Build-${GIT_BRANCH[$i]} \
+      --org $DEVOPS_ORG \
+      --project $DEVOPS_PROJECT 
+  done
+elif [ $DEVOPS_TARGET == "GITHUB" ]; then
+  # Add SP_INFO as credential in GH
+  gh secret set AZURE_CREDENTIALS -b"$SP_INFO"
+
+else
+  echo "ERROR: Something amiss" 
+  exit 1
+fi
 
 echo "The following environment(s) have been created:"
 echo "${ENV_NAME[@]}"
