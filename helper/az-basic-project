@@ -1,0 +1,238 @@
+#!/bin/bash
+
+# This script bootstraps a basic project for Azure DevOps
+# Running this script will create a storage account.
+# It also will create a Project oriented resource group and a service principle.
+# The service principal has Owner for the resource group created and is 
+# stored in a keyvault that can be accessed by Azure DevOps to configure
+# Azure access 
+
+set -o errexit  # exit if any statement returns a non-true return value
+shopt -s expand_aliases
+
+# Print out something but not the real thing
+mask() {
+  local n=${#1}/2              # number characters left intact
+  local a="${1:0:${#1}-n}"     # take all but the last n chars
+  local b="${1:${#1}-n}"       # take the final n chars 
+  printf "%s%s\n" "${a//?/*}" "$b"   # substitute a with asterisks
+}
+
+upper() {
+  echo $1 | tr "[:lower:]" "[:upper:]"
+}
+
+lower() {
+  echo $1 | tr "[:upper:]" "[:lower:]"
+}
+
+usage() { 
+  echo "`basename $0`"
+  echo "   Usage: " 
+  echo "     [-u <service principal appid>] service principal appid"
+  echo "     [-s <storage account>] storage account to use for Terraform state"
+  echo "     [-k <keyvault name>] keyvault to store service principal in"
+  echo "     [-r <region>] region to use. EastUs or USGovVirginia are defaults"
+  echo "     [-n <prefix>] prefix to use for Azure resources.  Must be unique across Azure"
+  echo "     [-g <resource group>] existing resource group."
+  exit 1
+}
+
+# Catch any help requests
+for arg in "$@"; do
+  case "$arg" in
+    --help| -h) 
+        usage
+        ;;
+  esac
+done
+
+echo "Check program requirements..."
+(
+  set +e
+  programs=(az jq git gh)
+  missing=0
+  for i in ${programs[@]}; do
+      command -v $i 2&> /dev/null
+      if [ $? -eq 0 ]; then
+          echo " * Found $i"
+      else
+          echo " * ERROR: missing $i"
+          missing=1
+      fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+      echo "Missing required commands"
+      exit 1
+  fi
+  set -e
+)
+
+
+while getopts s:k:r:n:u:g: option
+do
+  case "${option}"
+  in
+      g) RESOURCE_GROUP=${OPTARG};;
+      n) PREFIX=${OPTARG};;
+      u) SP_APPID=${OPTARG};;
+      k) KEYVAULT_NAME=${OPTARG};;
+      s) STORAGE_ACCT_NAME=${OPTARG};;
+      r) REGION=${OPTARG};;
+      *) usage;;
+  esac
+done
+shift "$(($OPTIND -1))"
+
+# TODO: Support other subscriptions
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+# See if SP info was passed in or not
+if ! [ -z $SP_APPID ]; then
+  SP_INFO=$(az ad sp show --id $SP_APPID --query '{clientId:appId, displayName:displayName, tenantId:appOwnerTenantId, objectId:objectId}' -o json)
+  SP_NAME=$(echo $SP_INFO | jq -e -r 'select(.displayName != null) | .displayName')
+  echo $SP_INFO
+fi
+
+#Get a Random number that gets used for uniqueness
+RND=$(echo $RANDOM | grep -o ....$)
+
+# 4 digit random number if no prefix is defined
+if [ -z $PREFIX ]; then
+  PREFIX=PROJ-$RND
+fi
+
+# Get rid of weird characters because they cause issues in some Azure resources
+PREFIX=$(echo $PREFIX | tr -dc '[:alnum:]\n\r')
+UPREFIX=$(echo $PREFIX | tr "[:lower:]" "[:upper:]") 
+LPREFIX=$(echo $PREFIX | tr "[:upper:]" "[:lower:]") 
+
+# Check if Region is passed in, otherwise eastus will be used
+if [ -z "$REGION" ]; then
+  # check if in gov or commercial
+  CLOUD=`az account list-locations -o json | jq -r '.[0].name'`
+  if [ ${CLOUD:0:5} = "usgov" ]; then
+      REGION='usgovvirginia'
+  else
+      REGION='eastus'
+  fi
+fi
+
+# Set Keyvault where Service Principal info will be stored
+if [ -z "$KEYVAULT_NAME" ]; then
+  KEYVAULT_NAME=$LPREFIX-kv
+fi
+
+# Set Service principal name to be used
+if [ -z "$SP_NAME" ]; then
+  SP_NAME=$LPREFIX-sp
+fi
+
+# Set RG name to be used
+if [ -z "$RESOURCE_GROUP" ]; then
+  RESOURCE_GROUP=$UPREFIX-RG
+fi
+
+# Set SA name to be used
+if [ -z "$STORAGE_ACCT_NAME" ]; then
+  STORAGE_ACCT_NAME=${LPREFIX}sa
+fi
+
+echo -e "\nThe following resources will be used or created...\n"
+echo "PREFIX:               $PREFIX"
+echo "RESOURCE_GROUP:       ${RESOURCE_GROUP}"
+echo "SP_NAME:              $SP_NAME"
+echo "KEYVAULT_NAME:        $KEYVAULT_NAME"
+echo "STORAGE_ACCT_NAME:    $STORAGE_ACCT_NAME"
+echo "REGION:               $REGION"
+echo ""
+echo -e "NOTE: Service Principal $SP_NAME with Owner permisions on $RESOURCE_GROUP will be stored in $KEYVAULT_NAME\n"
+
+read -p "Are you sure you want to Proceed [y/N]?"
+if ! [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    echo "Maybe next time!"
+    exit 1 
+fi
+
+alias echo="echo -e"
+
+# Create resource group
+RG_ID=$(az group create --name $RESOURCE_GROUP --location $REGION --query id -o tsv)
+
+# Create storage account if required because of Terraform
+# Retrieve or create the storage account
+set +e
+SA_ID=$(az storage account show --name $STORAGE_ACCT_NAME --query "id" -o tsv)
+if [ $? -ne 0 ]; then
+    echo "Storage Account does not exist.  Continuing and will create it".
+    SA_ID=$(az storage account create --resource-group $RESOURCE_GROUP --name $STORAGE_ACCT_NAME --sku Standard_LRS --encryption-services blob --query "id" -o tsv)
+fi
+set -e
+
+# Get storage account key
+ACCOUNT_KEY=$(az storage account keys list --account-name $STORAGE_ACCT_NAME --query [0].value -o tsv)
+
+echo "storage_account_name:   $STORAGE_ACCT_NAME"
+
+# Create Keyvault if it doesn't exist.  This keyvault will hold service principal info
+# for our projects.  
+set +e
+KEYVAULT_ID=$(az keyvault show -n $KEYVAULT_NAME --query "id" -o tsv)
+if [ $? -ne 0 ]; then
+    echo "Keyvault does not exist.  Continuing and will create it".
+    KEYVAULT_ID=$(az keyvault create -n $KEYVAULT_NAME -g $RESOURCE_GROUP --query "id" -o tsv)
+fi
+set -e
+
+if [ -z $KEYVAULT_ID ]; then
+  echo "ERROR: Cannot retrieve or create Keyvault. Exitting."
+  exit 1
+fi
+
+#################################
+#### Create Project Resources
+#################################
+
+# Create Service Principal
+echo "Create or retrieve Service Principal"
+if [ -z $SP_INFO ]; then
+  echo "Looking up SP"
+  SP_INFO=$(az ad sp create-for-rbac --sdk -n $SP_NAME --skip-assignment -o json)
+  SP_APPID=$(echo $SP_INFO | jq -e -r 'select(.clientId != null) | .clientId')
+  SP_PASSWORD=$(echo $SP_INFO | jq -e -r 'select(.clientSecret != null) | .clientSecret')
+  SP_OBJID=$(az ad sp show --id $SP_APPID --query objectId -o tsv)
+  SP_INFO=$(echo $SP_INFO | jq -r --arg OBJECTID $SP_OBJID '. + { "objectId": $OBJECTID }')
+fi
+
+# Grab info from the Service Principal.  Should be the same whether just created or passed in
+SP_APPID=$(echo $SP_INFO | jq -e -r 'select(.clientId != null) | .clientId')
+SP_TENANTID=$(echo $SP_INFO | jq -e -r 'select(.tenantId != null) | .tenantId')
+SP_OBJID=$(echo $SP_INFO | jq -e -r 'select(.objectId != null) | .objectId')
+
+# Wait for Progagation via loop
+echo "Sleeping in loop for 5 seconds to propagate SP"
+until az ad sp show --id $SP_APPID &> /dev/null ; do echo "Waiting for Azure AD propagation" && sleep 5; done
+
+#Now that we have a SP let's give it some permissions
+az role assignment create --role Owner --scope $RG_ID --assignee $SP_APPID -o json
+
+# echo "SP_APPID=$SP_APPID"
+# echo "SP_PASSWORD=$SP_PASSWORD"
+# echo "SP_TENANTID=$SP_TENANTID"
+# echo "SUBSCRIPTION_ID=$SUBSCRIPTION_ID"
+
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "SA-ACCESS-KEY" --value "$ACCOUNT_KEY"
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "SP-CLIENTID" --value "$SP_APPID"
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "SP-SUBSCRIPTIONID" --value "$SUBSCRIPTION_ID" 
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "SP-TENANTID" --value "$SP_TENANTID" 
+az keyvault secret set --vault-name $KEYVAULT_NAME --name "SP-PASSWORD" --value "$SP_PASSWORD" 
+
+# Allow SP to manage Keyvault
+az keyvault set-policy --name $KEYVAULT_NAME --object-id $SP_OBJID \
+  --certificate-permissions backup create delete deleteissuers get getissuers import list listissuers managecontacts manageissuers purge recover restore setissuers update \
+  --key-permissions backup create decrypt delete encrypt get import list purge recover restore sign unwrapKey update verify wrapKey \
+  --secret-permissions backup delete get list purge recover restore set \
+  --storage-permissions backup delete deletesas get getsas list listsas purge recover regeneratekey restore set setsas update
+
+echo $SP_INFO
+echo "THE END"
