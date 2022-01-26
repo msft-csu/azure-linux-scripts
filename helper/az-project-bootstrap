@@ -175,6 +175,11 @@ if [[ $TERRAFORM == "true" && $BICEP == "true" ]]; then
   exit 1
 fi
 
+if [[ $TERRAFORM == "false" && $BICEP == "false" ]]; then
+  echo "ERROR must provide either --bicep or --terraform"
+  exit 1
+fi
+
 # Check if Region is passed in, otherwise eastus will be used
 if [ -z "$REGION" ]; then
   # check if in gov or commercial
@@ -295,6 +300,7 @@ fi
 if ! [ -z $DEVOPS ]; then
   MASK_TOKEN=$(mask $DEVOPS)
 fi
+
 
 echo -e "\nThe following resources will be used or created...\n"
 echo "PREFIX:               $PREFIX"
