@@ -771,32 +771,13 @@ locals {
     created_by = \"Terraform\" 
   }
 }
-resource "azurerm_key_vault" "vault" {
-  name                      = \"\${local.prefix}-\${local.environment}-kv\"
+resource "azurerm_storage_account" "storage-acct" {
+  name                      = \"\${local.prefix}\${local.environment}sa\"
   location                  = local.location
   resource_group_name       = local.resource_group 
-  sku_name                  = \"standard\"
-  tenant_id                 = data.azurerm_client_config.current.tenant_id
+  account_tier              = \"Standard\"
+  account_replication_type  = \"LRS\"
   tags                      = local.common_tags
-
-  access_policy {
-    tenant_id = data.azurerm_client_config.current.tenant_id
-    object_id = data.azurerm_client_config.current.object_id
-
-    key_permissions = [
-      \"get\",\"list\",\"create\",\"delete\",\"encrypt\",\"decrypt\",\"unwrapKey\",\"wrapKey\",\"purge\",\"recover\",\"restore\"
-    ]
-
-    secret_permissions = [
-      \"get\",\"list\",\"set\",\"delete\",\"purge\",\"recover\",\"restore\"
-    ]
-    certificate_permissions = [
-      \"backup\",\"create\",\"delete\",\"get\",\"import\",\"list\",\"purge\",\"recover\",\"restore\",\"update\"
-    ]
-    storage_permissions = [
-      \"get\",\"list\",\"set\",\"delete\",\"purge\",\"recover\",\"restore\"
-    ]
-  }
 }
 EOS
 
